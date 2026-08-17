@@ -1,0 +1,6 @@
+# Tells Railway how to build/run this bot (Python + FFmpeg for audio playback)
+[phases.setup]
+nixPkgs = ["python312", "ffmpeg"]
+
+[start]
+cmd = "python bot.py"
