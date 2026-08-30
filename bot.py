@@ -5,15 +5,20 @@ When a member joins ANY voice channel and at least one other human is
 already inside, the bot joins, plays that member's pre-recorded name
 clip, and leaves immediately.
 
-Admins upload clips with:  /setclip @member <audio file>
+Admins add clips with:  /setclip @member <audio file or direct URL>
 Uploading again for the same member replaces the old clip.
 """
 
-import os
-import glob
-import time
 import asyncio
+import glob
+import ipaddress
+import os
+import socket
+import time
+import uuid
+from urllib.parse import urljoin, urlparse
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -26,7 +31,24 @@ if not TOKEN:
 
 CLIP_DIR = os.getenv("CLIP_DIR", "clips")          # where name clips live
 COOLDOWN_SECONDS = 60                              # anti-spam per member
+MAX_CLIP_BYTES = 10 * 1024 * 1024                  # 10 MiB
+DOWNLOAD_TIMEOUT_SECONDS = 20
+MAX_REDIRECTS = 3
 ALLOWED_EXT = {".mp3", ".wav", ".ogg", ".m4a", ".webm", ".opus"}
+CONTENT_TYPE_EXT = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/vnd.wave": ".wav",
+    "audio/ogg": ".ogg",
+    "application/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/webm": ".webm",
+    "video/webm": ".webm",
+    "audio/opus": ".opus",
+}
 
 os.makedirs(CLIP_DIR, exist_ok=True)
 
@@ -44,6 +66,90 @@ def clip_path(user_id: int) -> str | None:
     """Return the saved clip file for a user, or None."""
     matches = glob.glob(os.path.join(CLIP_DIR, f"{user_id}.*"))
     return matches[0] if matches else None
+
+
+def _extension_from_url_or_type(url: str, content_type: str) -> str | None:
+    """Find a supported audio extension from a URL path or Content-Type."""
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    if ext in ALLOWED_EXT:
+        return ext
+    return CONTENT_TYPE_EXT.get(content_type.split(";", 1)[0].strip().lower())
+
+
+async def _validate_public_url(url: str) -> None:
+    """Reject malformed URLs and hosts that resolve to private/local networks."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("The link must be a valid public HTTP or HTTPS URL.")
+    if parsed.username or parsed.password:
+        raise ValueError("Links containing a username or password are not allowed.")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo, parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("The link's host could not be resolved.") from exc
+
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise ValueError("Links to private or local network addresses are not allowed.")
+
+
+async def _download_url_clip(url: str, temp_path: str) -> str:
+    """Download a direct public audio URL to temp_path and return its extension."""
+    timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_SECONDS)
+    current_url = url
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            await _validate_public_url(current_url)
+            async with session.get(current_url, allow_redirects=False) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    if redirect_count == MAX_REDIRECTS:
+                        raise ValueError("The audio link redirects too many times.")
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("The audio link returned an invalid redirect.")
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                if response.status < 200 or response.status >= 300:
+                    raise ValueError(f"The audio link returned HTTP {response.status}.")
+
+                if response.content_length and response.content_length > MAX_CLIP_BYTES:
+                    raise ValueError("The linked audio file is larger than 10 MiB.")
+
+                ext = _extension_from_url_or_type(
+                    str(response.url), response.headers.get("Content-Type", ""))
+                if not ext:
+                    raise ValueError(
+                        "The link must point directly to a supported audio file "
+                        f"({', '.join(sorted(ALLOWED_EXT))}).")
+
+                downloaded = 0
+                with open(temp_path, "wb") as temp_file:
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        downloaded += len(chunk)
+                        if downloaded > MAX_CLIP_BYTES:
+                            raise ValueError("The linked audio file is larger than 10 MiB.")
+                        temp_file.write(chunk)
+
+                if downloaded == 0:
+                    raise ValueError("The linked audio file is empty.")
+                return ext
+
+    raise ValueError("The audio link could not be downloaded.")
+
+
+def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
+    """Atomically install a downloaded clip, then remove older formats."""
+    dest = os.path.join(CLIP_DIR, f"{user_id}{ext}")
+    os.replace(temp_path, dest)
+    for old in glob.glob(os.path.join(CLIP_DIR, f"{user_id}.*")):
+        if os.path.normcase(old) != os.path.normcase(dest):
+            os.remove(old)
 
 
 # ---------------------------------------------------------------- events
@@ -120,27 +226,59 @@ async def announce(channel: discord.VoiceChannel, path: str):
 @bot.tree.command(name="setclip",
                   description="Set or replace the join-announcement clip for a member (admin only)")
 @app_commands.describe(member="Who this clip belongs to",
-                       audio="Short audio file of their name (mp3/wav/ogg/m4a)")
+                       audio="Upload a short audio file",
+                       url="Or paste a direct public audio-file URL")
 @app_commands.checks.has_permissions(administrator=True)
 async def setclip(interaction: discord.Interaction,
                   member: discord.Member,
-                  audio: discord.Attachment):
-    ext = os.path.splitext(audio.filename or "")[1].lower()
-    if ext not in ALLOWED_EXT:
+                  audio: discord.Attachment | None = None,
+                  url: str | None = None):
+    if (audio is None) == (url is None):
         await interaction.response.send_message(
-            f"❌ Unsupported file type `{ext}`. Use one of: {', '.join(sorted(ALLOWED_EXT))}",
+            "❌ Provide exactly one source: either an audio attachment or a direct audio URL.",
             ephemeral=True)
         return
 
-    # replace any old clip for this member
-    for old in glob.glob(os.path.join(CLIP_DIR, f"{member.id}.*")):
-        os.remove(old)
+    if audio is not None:
+        ext = os.path.splitext(audio.filename or "")[1].lower()
+        if ext not in ALLOWED_EXT:
+            await interaction.response.send_message(
+                f"❌ Unsupported file type `{ext}`. Use one of: {', '.join(sorted(ALLOWED_EXT))}",
+                ephemeral=True)
+            return
+        if audio.size > MAX_CLIP_BYTES:
+            await interaction.response.send_message(
+                "❌ The audio file must be 10 MiB or smaller.", ephemeral=True)
+            return
+        if audio.size == 0:
+            await interaction.response.send_message(
+                "❌ The audio file is empty.", ephemeral=True)
+            return
 
-    dest = os.path.join(CLIP_DIR, f"{member.id}{ext}")
-    await audio.save(dest)
-    await interaction.response.send_message(
-        f"✅ Clip saved for **{member.display_name}** — it replaced any previous clip.",
-        ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    temp_path = os.path.join(CLIP_DIR, f".{member.id}.{uuid.uuid4().hex}.tmp")
+
+    try:
+        if audio is not None:
+            await audio.save(temp_path)
+            if os.path.getsize(temp_path) > MAX_CLIP_BYTES:
+                raise ValueError("The audio file must be 10 MiB or smaller.")
+            if os.path.getsize(temp_path) == 0:
+                raise ValueError("The audio file is empty.")
+        else:
+            ext = await _download_url_clip(url, temp_path)
+
+        _install_clip(temp_path, member.id, ext)
+        source = "uploaded file" if audio is not None else "direct URL"
+        await interaction.followup.send(
+            f"✅ Clip saved for **{member.display_name}** from the {source} — "
+            "it replaced any previous clip.",
+            ephemeral=True)
+    except (ValueError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        await interaction.followup.send(f"❌ Could not save the clip: {exc}", ephemeral=True)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @bot.tree.command(name="removeclip",
@@ -184,4 +322,5 @@ async def admin_only_error(interaction: discord.Interaction, error):
         raise error
 
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)

@@ -11,9 +11,15 @@ The first person into an empty channel stays un-announced.
 - 60-second cooldown per person so reconnect spam doesn't blast audio.
 - People with no recorded clip are skipped silently.
 - Admins manage clips with slash commands:
-  - `/setclip @member <audio file>` — add or **replace** a clip
+  - `/setclip @member audio:<file>` — add or **replace** a clip by uploading it
+  - `/setclip @member url:<link>` — add or **replace** a clip from a direct audio URL
   - `/removeclip @member` — delete a clip
   - `/clips` — list who has clips
+
+For `/setclip`, provide exactly one source: `audio` or `url`. URL sources must be
+public HTTP(S) links that point directly to a supported audio file, not a YouTube,
+Spotify, SoundCloud, or other webpage. Supported formats are MP3, WAV, OGG, M4A,
+WebM, and Opus; files are limited to 10 MiB.
 
 ## Setup (one time, ~15 min)
 
@@ -44,7 +50,8 @@ You should see `✅ Logged in as ...`.
 ### 3. Test in Discord
 1. Friend A joins a voice channel alone → bot stays quiet ✅
 2. You join the same channel → nothing (you have no clip yet)
-3. Run `/setclip @yourself` and attach a short recording of your name
+3. Run `/setclip @yourself` and either attach a short recording of your name or
+   paste a direct audio-file link into the `url` option
 4. Leave and rejoin → bot hops in, says your name, leaves ✅
 
 ### 4. Host it 24/7 (Railway, ~$5/mo, easiest)
