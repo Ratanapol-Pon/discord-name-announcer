@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 
-
 _clip_dir = tempfile.TemporaryDirectory()
 os.environ["DISCORD_TOKEN"] = "test-token"
 os.environ["CLIP_DIR"] = _clip_dir.name
@@ -27,16 +26,19 @@ class ClipSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ".mp3",
             bot._extension_from_url_or_type(
-                "https://cdn.example/name.MP3?signature=abc", "application/octet-stream"),
+                "https://cdn.example/name.MP3?signature=abc", "application/octet-stream"
+            ),
         )
         self.assertEqual(
             ".ogg",
             bot._extension_from_url_or_type(
-                "https://cdn.example/download?id=1", "audio/ogg; charset=binary"),
+                "https://cdn.example/download?id=1", "audio/ogg; charset=binary"
+            ),
         )
         self.assertIsNone(
             bot._extension_from_url_or_type(
-                "https://example.com/watch?v=1", "text/html"),
+                "https://example.com/watch?v=1", "text/html"
+            ),
         )
 
     async def test_private_network_url_is_rejected(self):
@@ -60,7 +62,8 @@ class ClipSourceTests(unittest.IsolatedAsyncioTestCase):
                 temp_path = os.path.join(temp_dir, "download.tmp")
                 with patch.object(bot, "_validate_public_url", new=AsyncMock()):
                     ext = await bot._download_url_clip(
-                        f"http://127.0.0.1:{port}/clip", temp_path)
+                        f"http://127.0.0.1:{port}/clip", temp_path
+                    )
 
                 self.assertEqual(".mp3", ext)
                 with open(temp_path, "rb") as downloaded:
