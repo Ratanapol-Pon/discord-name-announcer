@@ -182,7 +182,7 @@ class AirtablePollStore:
         display_name: str,
         choice: str,
         reason: str | None,
-    ) -> None:
+    ) -> str:
         if choice not in {"yes", "maybe", "no"}:
             raise ValueError(f"Unsupported poll choice: {choice}")
         cleaned_reason = reason.strip() if reason else None
@@ -198,6 +198,8 @@ class AirtablePollStore:
             raise PollClosedError("This poll is already closed.")
 
         response_key = f"{poll['id']}:{user_id}"
+        existing = await self._find_one(RESPONSES_TABLE, "Response Key", response_key)
+        existing_fields = (existing.get("fields") or {}) if existing else {}
         fields = {
             "Response Key": response_key,
             "Poll Key": poll["id"],
@@ -207,11 +209,49 @@ class AirtablePollStore:
             "Reason": cleaned_reason[:500] if cleaned_reason else "",
             "Responded At": datetime.now(timezone.utc).isoformat(),
         }
-        existing = await self._find_one(RESPONSES_TABLE, "Response Key", response_key)
+        if choice != "yes" or existing_fields.get("Choice") != "yes":
+            fields.update(
+                {
+                    "Joined Voice Chat": "no",
+                    "Joined At": "",
+                    "Voice Channel ID": "",
+                    "Voice Channel Name": "",
+                }
+            )
         if existing:
             await self._update(RESPONSES_TABLE, existing["id"], fields)
         else:
             await self._create(RESPONSES_TABLE, fields)
+        return poll["id"]
+
+    async def mark_yes_voice_join(
+        self,
+        poll_id: str,
+        user_id: int,
+        voice_channel_id: int,
+        voice_channel_name: str,
+    ) -> bool:
+        """Record the first voice join for a user whose current vote is Yes."""
+        response_key = f"{poll_id}:{user_id}"
+        record = await self._find_one(RESPONSES_TABLE, "Response Key", response_key)
+        if not record:
+            return False
+
+        fields = record.get("fields") or {}
+        if fields.get("Choice") != "yes" or fields.get("Joined Voice Chat") == "yes":
+            return False
+
+        await self._update(
+            RESPONSES_TABLE,
+            record["id"],
+            {
+                "Joined Voice Chat": "yes",
+                "Joined At": datetime.now(timezone.utc).isoformat(),
+                "Voice Channel ID": str(voice_channel_id),
+                "Voice Channel Name": voice_channel_name[:100],
+            },
+        )
+        return True
 
     async def get_responses(self, poll_id: str) -> list[dict[str, Any]]:
         params: dict[str, str | int] = {
@@ -236,6 +276,12 @@ class AirtablePollStore:
                 "choice": record["fields"]["Choice"],
                 "reason": record["fields"].get("Reason") or None,
                 "responded_at": record["fields"].get("Responded At"),
+                "joined_voice_chat": record["fields"].get("Joined Voice Chat") == "yes",
+                "joined_at": record["fields"].get("Joined At"),
+                "voice_channel_id": int(record["fields"]["Voice Channel ID"])
+                if record["fields"].get("Voice Channel ID")
+                else None,
+                "voice_channel_name": record["fields"].get("Voice Channel Name"),
             }
             for record in records
         ]

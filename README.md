@@ -10,8 +10,11 @@ It also runs a daily game poll:
 - **Yes** and **Maybe** are one-click responses.
 - **No** opens a required reason form.
 - People can change their answer until the poll closes.
+- When a **Yes** voter joins any server voice channel that day, Teemo records
+  the first join time and voice channel in Airtable.
 - **18:00 Asia/Bangkok:** closes the poll, posts a summary, and keeps the poll,
-  latest responses, No reasons, and final report snapshot in Airtable.
+  latest responses, No reasons, Yes-voter voice attendance, and final report
+  snapshot in Airtable.
 - A restart between 11:59 and 18:00 catches up a missing poll; a restart after
   18:00 retries a missing report for an existing poll.
 
@@ -57,7 +60,9 @@ Create a base named **Teemo Game Polls** with these tables and fields:
   (text or single select), and `Closed At` (date/time).
 - `Responses`: `Response Key` (primary text), `Poll Key` (text), `User ID`
   (text), `Display Name` (text), `Choice` (text or single select), `Reason`
-  (long text), and `Responded At` (date/time).
+  (long text), `Responded At` (ISO timestamp text), `Joined Voice Chat` (text),
+  `Joined At` (ISO timestamp text), `Voice Channel ID` (text), and
+  `Voice Channel Name` (text).
 - `Reports`: `Poll Key` (primary text), `Message ID` (text), `Yes Count`,
   `Maybe Count`, and `No Count` (numbers), `No Reasons JSON` and
   `Responses JSON` (long text), and `Generated At` (date/time).

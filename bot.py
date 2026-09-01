@@ -297,6 +297,16 @@ async def on_voice_state_update(
 
     channel = after.channel
 
+    if game_poll_service:
+        try:
+            await game_poll_service.track_voice_join(
+                member, channel, datetime.now(BOT_TIMEZONE).date()
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to record voice attendance for Discord user %s", member.id
+            )
+
     # rule: stay quiet for the FIRST person in the channel
     other_humans = [m for m in channel.members if not m.bot and m.id != member.id]
     if len(other_humans) < 1:

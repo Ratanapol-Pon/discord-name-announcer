@@ -47,6 +47,50 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PollClosedError):
             await self.store.record_response(800, 1, "Rz", "yes", None)
 
+    async def test_yes_vote_starts_as_not_joined(self):
+        self.store.get_poll_by_message = AsyncMock(
+            return_value={"id": "recPoll", "status": "open"}
+        )
+        self.store._find_one = AsyncMock(return_value=None)
+        self.store._create = AsyncMock(return_value={"id": "recResponse"})
+
+        poll_id = await self.store.record_response(800, 1, "Rz", "yes", None)
+
+        self.assertEqual("recPoll", poll_id)
+        fields = self.store._create.await_args.args[1]
+        self.assertEqual("yes", fields["Choice"])
+        self.assertEqual("no", fields["Joined Voice Chat"])
+        self.assertEqual("", fields["Joined At"])
+
+    async def test_first_voice_join_is_saved_for_yes_voter(self):
+        self.store._find_one = AsyncMock(
+            return_value={
+                "id": "recResponse",
+                "fields": {"Choice": "yes", "Joined Voice Chat": "no"},
+            }
+        )
+        self.store._update = AsyncMock()
+
+        changed = await self.store.mark_yes_voice_join("recPoll", 1, 555, "Game Room")
+
+        self.assertTrue(changed)
+        fields = self.store._update.await_args.args[2]
+        self.assertEqual("yes", fields["Joined Voice Chat"])
+        self.assertEqual("555", fields["Voice Channel ID"])
+        self.assertEqual("Game Room", fields["Voice Channel Name"])
+        self.assertTrue(fields["Joined At"])
+
+    async def test_voice_join_is_ignored_for_non_yes_voter(self):
+        self.store._find_one = AsyncMock(
+            return_value={"id": "recResponse", "fields": {"Choice": "maybe"}}
+        )
+        self.store._update = AsyncMock()
+
+        changed = await self.store.mark_yes_voice_join("recPoll", 1, 555, "Game Room")
+
+        self.assertFalse(changed)
+        self.store._update.assert_not_awaited()
+
     async def test_response_pages_are_combined(self):
         self.store._request = AsyncMock(
             side_effect=[
@@ -58,6 +102,10 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
                                 "Display Name": "Rz",
                                 "Choice": "yes",
                                 "Responded At": "2026-09-01T05:00:00Z",
+                                "Joined Voice Chat": "yes",
+                                "Joined At": "2026-09-01T06:00:00Z",
+                                "Voice Channel ID": "555",
+                                "Voice Channel Name": "Game Room",
                             }
                         }
                     ],
@@ -82,6 +130,9 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         responses = await self.store.get_responses("recPoll")
 
         self.assertEqual(["Rz", "Teemo"], [row["display_name"] for row in responses])
+        self.assertTrue(responses[0]["joined_voice_chat"])
+        self.assertEqual("Game Room", responses[0]["voice_channel_name"])
+        self.assertFalse(responses[1]["joined_voice_chat"])
         second_params = self.store._request.await_args_list[1].kwargs["params"]
         self.assertEqual("next-page", second_params["offset"])
 

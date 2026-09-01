@@ -45,6 +45,16 @@ def _response_names(responses: Iterable[dict[str, Any]], choice: str) -> str:
     return ", ".join(names) if names else "—"
 
 
+def _attendance_names(responses: Iterable[dict[str, Any]], joined: bool) -> str:
+    names = [
+        discord.utils.escape_markdown(str(response["display_name"]))
+        for response in responses
+        if response["choice"] == "yes"
+        and bool(response.get("joined_voice_chat")) is joined
+    ]
+    return ", ".join(names) if names else "—"
+
+
 def report_embed(
     poll_date: date, timezone_name: str, report: dict[str, Any]
 ) -> discord.Embed:
@@ -81,6 +91,14 @@ def report_embed(
     if len(reason_text) > 1000:
         reason_text = reason_text[:997] + "..."
     embed.add_field(name="Reasons from No votes", value=reason_text, inline=False)
+    embed.add_field(
+        name="🎧 Yes-voter voice attendance",
+        value=(
+            f"**Joined:** {_attendance_names(responses, True)}\n"
+            f"**Not joined by report time:** {_attendance_names(responses, False)}"
+        ),
+        inline=False,
+    )
     embed.set_footer(text=f"Closed at 18:00 ({timezone_name}) • Saved to Airtable")
     return embed
 
@@ -191,11 +209,7 @@ class GamePollService:
         restored = 0
         for channel_id in self.channel_ids:
             poll = await self.store.get_poll(channel_id, poll_date)
-            if (
-                poll
-                and poll.get("message_id")
-                and poll.get("status", "open") == "open"
-            ):
+            if poll and poll.get("message_id") and poll.get("status", "open") == "open":
                 self.bot.add_view(
                     GamePollView(self), message_id=int(poll["message_id"])
                 )
@@ -229,9 +243,19 @@ class GamePollService:
         display_name = getattr(interaction.user, "display_name", interaction.user.name)
         try:
             async with self._poll_lifecycle_lock:
-                await self.store.record_response(
+                poll_id = await self.store.record_response(
                     message_id, interaction.user.id, display_name, choice, reason
                 )
+                voice_channel = getattr(
+                    getattr(interaction.user, "voice", None), "channel", None
+                )
+                if choice == "yes" and voice_channel is not None:
+                    await self.store.mark_yes_voice_join(
+                        poll_id,
+                        interaction.user.id,
+                        voice_channel.id,
+                        voice_channel.name,
+                    )
             suffix = f" Reason: {reason.strip()}" if reason else ""
             await interaction.followup.send(
                 f"Your response is now **{choice.title()}**.{suffix}", ephemeral=True
@@ -243,6 +267,22 @@ class GamePollService:
             await interaction.followup.send(
                 "I couldn't save that response. Please try again.", ephemeral=True
             )
+
+    async def track_voice_join(
+        self,
+        member: discord.Member,
+        voice_channel: discord.abc.GuildChannel,
+        poll_date: date,
+    ) -> bool:
+        """Mark a Yes voter as attended when they first join server voice."""
+        async with self._poll_lifecycle_lock:
+            for poll_channel_id in self.channel_ids:
+                poll = await self.store.get_poll(poll_channel_id, poll_date)
+                if poll and int(poll["guild_id"]) == member.guild.id:
+                    return await self.store.mark_yes_voice_join(
+                        poll["id"], member.id, voice_channel.id, voice_channel.name
+                    )
+        return False
 
     async def generate_daily_reports(self, poll_date: date) -> None:
         for channel_id in self.channel_ids:

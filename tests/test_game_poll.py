@@ -46,7 +46,13 @@ class GamePollUiTests(unittest.TestCase):
             "maybe_count": 1,
             "no_count": 1,
             "responses": [
-                {"user_id": 1, "display_name": "Rz", "choice": "yes", "reason": None},
+                {
+                    "user_id": 1,
+                    "display_name": "Rz",
+                    "choice": "yes",
+                    "reason": None,
+                    "joined_voice_chat": True,
+                },
                 {
                     "user_id": 2,
                     "display_name": "Teemo",
@@ -72,6 +78,7 @@ class GamePollUiTests(unittest.TestCase):
         self.assertEqual("Teemo", fields["🤔 Maybe (1)"])
         self.assertEqual("Ahri", fields["❌ No (1)"])
         self.assertIn("Working late", fields["Reasons from No votes"])
+        self.assertIn("Joined:** Rz", fields["🎧 Yes-voter voice attendance"])
         self.assertIn("Saved to Airtable", embed.footer.text)
 
 
@@ -135,6 +142,23 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(0, restored)
         self.bot.add_view.assert_not_called()
+
+    async def test_voice_join_marks_yes_voter_for_same_guild_poll(self):
+        self.store.get_poll = AsyncMock(
+            return_value={"id": "recPoll", "guild_id": 99, "status": "open"}
+        )
+        self.store.mark_yes_voice_join = AsyncMock(return_value=True)
+        member = SimpleNamespace(id=1, guild=SimpleNamespace(id=99))
+        voice_channel = SimpleNamespace(id=555, name="Game Room")
+
+        changed = await self.service.track_voice_join(
+            member, voice_channel, date(2026, 9, 2)
+        )
+
+        self.assertTrue(changed)
+        self.store.mark_yes_voice_join.assert_awaited_once_with(
+            "recPoll", 1, 555, "Game Room"
+        )
 
     async def test_report_closes_before_snapshot_and_disables_poll(self):
         order = []
