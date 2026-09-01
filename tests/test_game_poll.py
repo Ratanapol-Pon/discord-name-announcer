@@ -113,6 +113,29 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(created)
         self.channel.send.assert_not_awaited()
 
+    async def test_restore_open_poll_view_binds_message_id(self):
+        self.store.get_poll = AsyncMock(
+            return_value={"id": 7, "message_id": 800, "status": "open"}
+        )
+
+        restored = await self.service.restore_open_poll_views(date(2026, 9, 2))
+
+        self.assertEqual(1, restored)
+        self.bot.add_view.assert_called_once()
+        view = self.bot.add_view.call_args.args[0]
+        self.assertIsInstance(view, GamePollView)
+        self.assertEqual(800, self.bot.add_view.call_args.kwargs["message_id"])
+
+    async def test_restore_skips_closed_poll(self):
+        self.store.get_poll = AsyncMock(
+            return_value={"id": 7, "message_id": 800, "status": "closed"}
+        )
+
+        restored = await self.service.restore_open_poll_views(date(2026, 9, 2))
+
+        self.assertEqual(0, restored)
+        self.bot.add_view.assert_not_called()
+
     async def test_report_closes_before_snapshot_and_disables_poll(self):
         order = []
         poll = {"id": 7, "message_id": 800, "status": "open"}

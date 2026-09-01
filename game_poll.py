@@ -186,6 +186,22 @@ class GamePollService:
             except Exception:
                 LOGGER.exception("Failed to post game poll in channel %s", channel_id)
 
+    async def restore_open_poll_views(self, poll_date: date) -> int:
+        """Bind persisted button views to today's open poll messages."""
+        restored = 0
+        for channel_id in self.channel_ids:
+            poll = await self.store.get_poll(channel_id, poll_date)
+            if (
+                poll
+                and poll.get("message_id")
+                and poll.get("status", "open") == "open"
+            ):
+                self.bot.add_view(
+                    GamePollView(self), message_id=int(poll["message_id"])
+                )
+                restored += 1
+        return restored
+
     async def post_poll(self, channel_id: int, poll_date: date) -> bool:
         channel = await self._get_channel(channel_id)
         guild_id = channel.guild.id

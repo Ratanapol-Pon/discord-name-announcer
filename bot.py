@@ -266,13 +266,17 @@ async def on_ready():
                 "Airtable health check failed. Verify the base schema and access token."
             )
             return
+        restored_views = await game_poll_service.restore_open_poll_views(
+            datetime.now(BOT_TIMEZONE).date()
+        )
         poll_runtime_started = True
         daily_game_poll.start()
         daily_game_poll_report.start()
         asyncio.create_task(_catch_up_game_poll_schedule())
         print(
             f"✅ Daily game poll enabled at {POLL_CLOCK:%H:%M}; "
-            f"report at {REPORT_CLOCK:%H:%M} ({TIMEZONE_NAME})"
+            f"report at {REPORT_CLOCK:%H:%M} ({TIMEZONE_NAME}); "
+            f"restored {restored_views} open poll view(s)"
         )
 
 
