@@ -9,6 +9,7 @@ from game_poll import (
     GamePollService,
     GamePollView,
     NoReasonModal,
+    YesTimeView,
     poll_embed,
     report_embed,
 )
@@ -34,6 +35,15 @@ class GamePollUiTests(unittest.TestCase):
         self.assertTrue(modal.reason.required)
         self.assertEqual(500, modal.reason.max_length)
 
+    def test_yes_time_view_has_evening_time_picker(self):
+        view = YesTimeView(service=object(), message_id=123)
+        select = view.children[0]
+
+        self.assertEqual("game_poll:yes_time", select.custom_id)
+        self.assertEqual("Flexible", select.options[0].value)
+        self.assertEqual("18:00", select.options[1].value)
+        self.assertEqual("23:30", select.options[-1].value)
+
     def test_poll_embed_shows_schedule_and_reason_behavior(self):
         embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok")
         self.assertIn("play any game tonight", embed.description)
@@ -51,6 +61,7 @@ class GamePollUiTests(unittest.TestCase):
                     "display_name": "Rz",
                     "choice": "yes",
                     "reason": None,
+                    "play_time": "20:00",
                     "joined_voice_chat": True,
                 },
                 {
@@ -74,7 +85,7 @@ class GamePollUiTests(unittest.TestCase):
         embed = report_embed(date(2026, 9, 1), "Asia/Bangkok", report)
         fields = {field.name: field.value for field in embed.fields}
 
-        self.assertEqual("Rz", fields["✅ Yes (1)"])
+        self.assertEqual("Rz — 20:00", fields["✅ Yes (1)"])
         self.assertEqual("Teemo", fields["🤔 Maybe (1)"])
         self.assertEqual("Ahri", fields["❌ No (1)"])
         self.assertIn("Working late", fields["Reasons from No votes"])

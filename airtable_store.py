@@ -17,6 +17,21 @@ POLLS_TABLE = "Polls"
 RESPONSES_TABLE = "Responses"
 REPORTS_TABLE = "Reports"
 MIN_REQUEST_INTERVAL_SECONDS = 0.22  # Airtable limit: 5 requests/second/base.
+PLAY_TIME_OPTIONS = (
+    "Flexible",
+    "18:00",
+    "18:30",
+    "19:00",
+    "19:30",
+    "20:00",
+    "20:30",
+    "21:00",
+    "21:30",
+    "22:00",
+    "22:30",
+    "23:00",
+    "23:30",
+)
 
 
 class PollClosedError(RuntimeError):
@@ -182,6 +197,7 @@ class AirtablePollStore:
         display_name: str,
         choice: str,
         reason: str | None,
+        play_time: str | None = None,
     ) -> str:
         if choice not in {"yes", "maybe", "no"}:
             raise ValueError(f"Unsupported poll choice: {choice}")
@@ -190,6 +206,10 @@ class AirtablePollStore:
             raise ValueError("A reason is required when choosing No.")
         if choice != "no":
             cleaned_reason = None
+        if choice == "yes" and play_time not in PLAY_TIME_OPTIONS:
+            raise ValueError("Please select a valid play time when choosing Yes.")
+        if choice != "yes":
+            play_time = None
 
         poll = await self.get_poll_by_message(message_id)
         if not poll:
@@ -207,6 +227,7 @@ class AirtablePollStore:
             "Display Name": display_name[:100],
             "Choice": choice,
             "Reason": cleaned_reason[:500] if cleaned_reason else "",
+            "Play Time": play_time or "",
             "Responded At": datetime.now(timezone.utc).isoformat(),
         }
         if choice != "yes" or existing_fields.get("Choice") != "yes":
@@ -275,6 +296,7 @@ class AirtablePollStore:
                 "display_name": record["fields"]["Display Name"],
                 "choice": record["fields"]["Choice"],
                 "reason": record["fields"].get("Reason") or None,
+                "play_time": record["fields"].get("Play Time") or None,
                 "responded_at": record["fields"].get("Responded At"),
                 "joined_voice_chat": record["fields"].get("Joined Voice Chat") == "yes",
                 "joined_at": record["fields"].get("Joined At"),

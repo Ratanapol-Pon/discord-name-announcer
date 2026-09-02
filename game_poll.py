@@ -10,7 +10,12 @@ from typing import Any
 
 import discord
 
-from airtable_store import AirtablePollStore, PollClosedError, PollNotFoundError
+from airtable_store import (
+    PLAY_TIME_OPTIONS,
+    AirtablePollStore,
+    PollClosedError,
+    PollNotFoundError,
+)
 
 LOGGER = logging.getLogger(__name__)
 POLL_QUESTION = "Does anyone want to play any game tonight?"
@@ -26,6 +31,7 @@ def poll_embed(poll_date: date, timezone_name: str) -> discord.Embed:
         name="How to answer",
         value=(
             "Choose **Yes**, **Maybe**, or **No** below. "
+            "Choosing **Yes** asks for your preferred start time. "
             "Choosing **No** opens a required reason form."
         ),
         inline=False,
@@ -37,11 +43,15 @@ def poll_embed(poll_date: date, timezone_name: str) -> discord.Embed:
 
 
 def _response_names(responses: Iterable[dict[str, Any]], choice: str) -> str:
-    names = [
-        discord.utils.escape_markdown(str(response["display_name"]))
-        for response in responses
-        if response["choice"] == choice
-    ]
+    names = []
+    for response in responses:
+        if response["choice"] != choice:
+            continue
+        name = discord.utils.escape_markdown(str(response["display_name"]))
+        if choice == "yes" and response.get("play_time"):
+            play_time = discord.utils.escape_markdown(str(response["play_time"]))
+            name = f"{name} — {play_time}"
+        names.append(name)
     return ", ".join(names) if names else "—"
 
 
@@ -105,6 +115,42 @@ class NoReasonModal(discord.ui.Modal, title="Why can't you play tonight?"):
         )
 
 
+class YesTimeSelect(discord.ui.Select):
+    def __init__(self, service: GamePollService, message_id: int) -> None:
+        self.service = service
+        self.message_id = message_id
+        options = [
+            discord.SelectOption(
+                label=play_time,
+                value=play_time,
+                description="I can start at any time" if play_time == "Flexible" else None,
+            )
+            for play_time in PLAY_TIME_OPTIONS
+        ]
+        super().__init__(
+            placeholder="Select your preferred start time",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="game_poll:yes_time",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.service.save_interaction_response(
+            interaction,
+            self.message_id,
+            "yes",
+            None,
+            play_time=self.values[0],
+        )
+
+
+class YesTimeView(discord.ui.View):
+    def __init__(self, service: GamePollService, message_id: int) -> None:
+        super().__init__(timeout=300)
+        self.add_item(YesTimeSelect(service, message_id))
+
+
 class GamePollView(discord.ui.View):
     def __init__(self, service: GamePollService, disabled: bool = False) -> None:
         super().__init__(timeout=None)
@@ -122,8 +168,10 @@ class GamePollView(discord.ui.View):
     async def yes(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        await self.service.save_interaction_response(
-            interaction, interaction.message.id, "yes", None
+        await interaction.response.send_message(
+            f"What time can you start playing? Times use **{self.service.timezone_name}**.",
+            view=YesTimeView(self.service, interaction.message.id),
+            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -219,6 +267,7 @@ class GamePollService:
         message_id: int,
         choice: str,
         reason: str | None,
+        play_time: str | None = None,
     ) -> None:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
@@ -226,7 +275,12 @@ class GamePollService:
         try:
             async with self._poll_lifecycle_lock:
                 poll_id = await self.store.record_response(
-                    message_id, interaction.user.id, display_name, choice, reason
+                    message_id,
+                    interaction.user.id,
+                    display_name,
+                    choice,
+                    reason,
+                    play_time,
                 )
                 voice_channel = getattr(
                     getattr(interaction.user, "voice", None), "channel", None
@@ -238,7 +292,10 @@ class GamePollService:
                         voice_channel.id,
                         voice_channel.name,
                     )
-            suffix = f" Reason: {reason.strip()}" if reason else ""
+            if play_time:
+                suffix = f" Preferred start time: **{play_time}**."
+            else:
+                suffix = f" Reason: {reason.strip()}" if reason else ""
             await interaction.followup.send(
                 f"Your response is now **{choice.title()}**.{suffix}", ephemeral=True
             )

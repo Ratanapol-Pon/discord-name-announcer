@@ -7,7 +7,8 @@ The first person into an empty channel stays un-announced.
 It also runs a daily game poll:
 
 - **11:59 Asia/Bangkok:** asks whether anyone wants to play a game tonight.
-- **Yes** and **Maybe** are one-click responses.
+- **Yes** opens a private start-time picker (18:00–23:30 in 30-minute slots,
+  plus Flexible); **Maybe** is a one-click response.
 - **No** opens a required reason form.
 - People can change their answer until the poll closes.
 - When a **Yes** voter joins any server voice channel that day, Teemo records
@@ -60,9 +61,9 @@ Create a base named **Teemo Game Polls** with these tables and fields:
   (text or single select), and `Closed At` (date/time).
 - `Responses`: `Response Key` (primary text), `Poll Key` (text), `User ID`
   (text), `Display Name` (text), `Choice` (text or single select), `Reason`
-  (long text), `Responded At` (ISO timestamp text), `Joined Voice Chat` (text),
-  `Joined At` (ISO timestamp text), `Voice Channel ID` (text), and
-  `Voice Channel Name` (text).
+  (long text), `Play Time` (text), `Responded At` (ISO timestamp text),
+  `Joined Voice Chat` (text), `Joined At` (ISO timestamp text), `Voice Channel
+  ID` (text), and `Voice Channel Name` (text).
 - `Reports`: `Poll Key` (primary text), `Message ID` (text), `Yes Count`,
   `Maybe Count`, and `No Count` (numbers), `No Reasons JSON` and
   `Responses JSON` (long text), and `Generated At` (date/time).

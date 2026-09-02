@@ -45,6 +45,10 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
             return_value={"id": "recPoll", "status": "closed"}
         )
         with self.assertRaises(PollClosedError):
+            await self.store.record_response(800, 1, "Rz", "yes", None, "20:00")
+
+    async def test_yes_vote_requires_a_valid_play_time(self):
+        with self.assertRaisesRegex(ValueError, "valid play time"):
             await self.store.record_response(800, 1, "Rz", "yes", None)
 
     async def test_yes_vote_starts_as_not_joined(self):
@@ -54,11 +58,14 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         self.store._find_one = AsyncMock(return_value=None)
         self.store._create = AsyncMock(return_value={"id": "recResponse"})
 
-        poll_id = await self.store.record_response(800, 1, "Rz", "yes", None)
+        poll_id = await self.store.record_response(
+            800, 1, "Rz", "yes", None, "20:00"
+        )
 
         self.assertEqual("recPoll", poll_id)
         fields = self.store._create.await_args.args[1]
         self.assertEqual("yes", fields["Choice"])
+        self.assertEqual("20:00", fields["Play Time"])
         self.assertEqual("no", fields["Joined Voice Chat"])
         self.assertEqual("", fields["Joined At"])
 
@@ -101,6 +108,7 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
                                 "User ID": "1",
                                 "Display Name": "Rz",
                                 "Choice": "yes",
+                                "Play Time": "20:00",
                                 "Responded At": "2026-09-01T05:00:00Z",
                                 "Joined Voice Chat": "yes",
                                 "Joined At": "2026-09-01T06:00:00Z",
@@ -131,6 +139,7 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["Rz", "Teemo"], [row["display_name"] for row in responses])
         self.assertTrue(responses[0]["joined_voice_chat"])
+        self.assertEqual("20:00", responses[0]["play_time"])
         self.assertEqual("Game Room", responses[0]["voice_channel_name"])
         self.assertFalse(responses[1]["joined_voice_chat"])
         second_params = self.store._request.await_args_list[1].kwargs["params"]
