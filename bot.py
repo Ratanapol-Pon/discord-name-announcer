@@ -53,7 +53,7 @@ except ZoneInfoNotFoundError as exc:
     raise SystemExit(f"Unknown BOT_TIMEZONE: {TIMEZONE_NAME}") from exc
 
 POLL_CLOCK = _parse_clock(os.getenv("POLL_TIME", "11:59"), "POLL_TIME")
-REPORT_CLOCK = _parse_clock(os.getenv("REPORT_TIME", "18:00"), "REPORT_TIME")
+REPORT_CLOCK = _parse_clock(os.getenv("REPORT_TIME", "17:00"), "REPORT_TIME")
 if REPORT_CLOCK <= POLL_CLOCK:
     raise SystemExit("REPORT_TIME must be later than POLL_TIME on the same day.")
 POLL_RUN_TIME = POLL_CLOCK.replace(tzinfo=BOT_TIMEZONE)

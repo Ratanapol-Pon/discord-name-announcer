@@ -37,7 +37,7 @@ def poll_embed(poll_date: date, timezone_name: str) -> discord.Embed:
         inline=False,
     )
     embed.set_footer(
-        text=f"Closes at 18:00 ({timezone_name}) • {poll_date.isoformat()} • You can change your vote"
+        text=f"Closes at 17:00 ({timezone_name}) • {poll_date.isoformat()} • You can change your vote"
     )
     return embed
 
@@ -91,7 +91,7 @@ def report_embed(
     if len(reason_text) > 1000:
         reason_text = reason_text[:997] + "..."
     embed.add_field(name="Reasons from No votes", value=reason_text, inline=False)
-    embed.set_footer(text=f"Closed at 18:00 ({timezone_name}) • Saved to Airtable")
+    embed.set_footer(text=f"Closed at 17:00 ({timezone_name}) • Saved to Airtable")
     return embed
 
 

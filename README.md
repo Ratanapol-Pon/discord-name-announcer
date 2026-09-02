@@ -13,11 +13,11 @@ It also runs a daily game poll:
 - People can change their answer until the poll closes.
 - When a **Yes** voter joins any server voice channel that day, Teemo records
   the first join time and voice channel in Airtable.
-- **18:00 Asia/Bangkok:** closes the poll and posts a summary of votes and No
+- **17:00 Asia/Bangkok:** closes the poll and posts a summary of votes and No
   reasons. Voice attendance stays private in Airtable and is not shown in the
   Discord summary.
-- A restart between 11:59 and 18:00 catches up a missing poll; a restart after
-  18:00 retries a missing report for an existing poll.
+- A restart between 11:59 and 17:00 catches up a missing poll; a restart after
+  17:00 retries a missing report for an existing poll.
 
 ## How it works
 

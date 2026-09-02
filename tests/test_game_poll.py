@@ -48,7 +48,7 @@ class GamePollUiTests(unittest.TestCase):
         embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok")
         self.assertIn("play any game tonight", embed.description)
         self.assertIn("required reason", embed.fields[0].value)
-        self.assertIn("18:00 (Asia/Bangkok)", embed.footer.text)
+        self.assertIn("17:00 (Asia/Bangkok)", embed.footer.text)
 
     def test_report_embed_contains_counts_names_and_no_reasons(self):
         report = {
