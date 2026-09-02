@@ -269,6 +269,19 @@ async def on_ready():
         restored_views = await game_poll_service.restore_open_poll_views(
             datetime.now(BOT_TIMEZONE).date()
         )
+        try:
+            started_sessions, closed_sessions = (
+                await game_poll_service.reconcile_voice_sessions(
+                    datetime.now(BOT_TIMEZONE).date()
+                )
+            )
+            voice_session_status = (
+                f"voice sessions reconciled ({started_sessions} started, "
+                f"{closed_sessions} closed)"
+            )
+        except Exception:
+            LOGGER.exception("Failed to reconcile active voice sessions")
+            voice_session_status = "voice-session reconciliation failed"
         poll_runtime_started = True
         daily_game_poll.start()
         daily_game_poll_report.start()
@@ -276,7 +289,8 @@ async def on_ready():
         print(
             f"✅ Daily game poll enabled at {POLL_CLOCK:%H:%M}; "
             f"report at {REPORT_CLOCK:%H:%M} ({TIMEZONE_NAME}); "
-            f"restored {restored_views} open poll view(s)"
+            f"restored {restored_views} open poll view(s); "
+            f"{voice_session_status}"
         )
 
 
@@ -287,6 +301,21 @@ async def on_voice_state_update(
     # ignore bots (including ourselves)
     if member.bot:
         return
+
+    # Ignore mute/deafen/video changes that do not change voice channel.
+    if before.channel == after.channel:
+        return
+
+    local_date = datetime.now(BOT_TIMEZONE).date()
+    if game_poll_service:
+        try:
+            await game_poll_service.track_voice_session(
+                member, before.channel, after.channel, local_date
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to record voice session for Discord user %s", member.id
+            )
 
     # only react to a FRESH join from outside voice chat.
     # (moving between channels does not re-announce; change this `if`
@@ -300,7 +329,7 @@ async def on_voice_state_update(
     if game_poll_service:
         try:
             await game_poll_service.track_voice_join(
-                member, channel, datetime.now(BOT_TIMEZONE).date()
+                member, channel, local_date
             )
         except Exception:
             LOGGER.exception(

@@ -171,6 +171,22 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
             "recPoll", 1, 555, "Game Room"
         )
 
+    async def test_voice_channel_move_closes_old_session_and_starts_new_one(self):
+        self.store.stop_voice_session = AsyncMock(return_value=600)
+        self.store.start_voice_session = AsyncMock(return_value="recVoice")
+        member = SimpleNamespace(id=1, display_name="Rz", guild=SimpleNamespace(id=99))
+        old_channel = SimpleNamespace(id=555, name="Lobby")
+        new_channel = SimpleNamespace(id=777, name="Game Room")
+
+        await self.service.track_voice_session(
+            member, old_channel, new_channel, date(2026, 9, 3)
+        )
+
+        self.store.stop_voice_session.assert_awaited_once_with(99, 1)
+        self.store.start_voice_session.assert_awaited_once_with(
+            99, 1, "Rz", 777, "Game Room", date(2026, 9, 3)
+        )
+
     async def test_report_closes_before_snapshot_and_disables_poll(self):
         order = []
         poll = {"id": 7, "message_id": 800, "status": "open"}

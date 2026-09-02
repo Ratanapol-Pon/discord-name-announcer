@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 from airtable_store import AirtablePollStore, PollClosedError
@@ -165,6 +165,110 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, report["yes_count"])
         self.assertEqual(1, report["no_count"])
         self.assertEqual("Working late", report["no_reasons"][0]["reason"])
+
+    async def test_voice_session_records_join_leave_and_duration(self):
+        joined_at = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        active_record = {
+            "id": "recVoice",
+            "fields": {
+                "Active Key": "99:1",
+                "Voice Channel ID": "555",
+                "Joined At": joined_at.isoformat(),
+            },
+        }
+        self.store._find_one = AsyncMock(side_effect=[None, active_record])
+        self.store._create = AsyncMock(return_value={"id": "recVoice"})
+        self.store._update = AsyncMock()
+
+        record_id = await self.store.start_voice_session(
+            99,
+            1,
+            "Rz",
+            555,
+            "Game Room",
+            date(2026, 9, 3),
+            joined_at=joined_at,
+        )
+        duration = await self.store.stop_voice_session(
+            99, 1, left_at=joined_at + timedelta(minutes=42)
+        )
+
+        self.assertEqual("recVoice", record_id)
+        created_fields = self.store._create.await_args.args[1]
+        self.assertEqual("99:1", created_fields["Active Key"])
+        self.assertEqual("555", created_fields["Voice Channel ID"])
+        self.assertEqual("2026-09-03", created_fields["Session Date"])
+        self.assertEqual(2520, duration)
+        closed_fields = self.store._update.await_args.args[2]
+        self.assertEqual("closed", closed_fields["Status"])
+        self.assertEqual("", closed_fields["Active Key"])
+        self.assertEqual(2520, closed_fields["Duration Seconds"])
+
+    async def test_duplicate_voice_join_reuses_active_session(self):
+        self.store._find_one = AsyncMock(
+            return_value={
+                "id": "recVoice",
+                "fields": {"Voice Channel ID": "555"},
+            }
+        )
+        self.store._create = AsyncMock()
+        self.store._update = AsyncMock()
+
+        record_id = await self.store.start_voice_session(
+            99, 1, "Rz", 555, "Game Room", date(2026, 9, 3)
+        )
+
+        self.assertEqual("recVoice", record_id)
+        self.store._create.assert_not_awaited()
+        self.store._update.assert_not_awaited()
+
+    async def test_voice_session_reconciliation_closes_stale_and_starts_missing(self):
+        self.store._get_active_voice_sessions = AsyncMock(
+            return_value=[
+                {
+                    "id": "recKeep",
+                    "fields": {
+                        "Active Key": "99:1",
+                        "Voice Channel ID": "555",
+                    },
+                },
+                {
+                    "id": "recClose",
+                    "fields": {
+                        "Active Key": "99:2",
+                        "Voice Channel ID": "777",
+                    },
+                },
+            ]
+        )
+        self.store._close_voice_session_record = AsyncMock(return_value=60)
+        self.store._create = AsyncMock(return_value={"id": "recNew"})
+        connected = [
+            {
+                "guild_id": 99,
+                "user_id": 1,
+                "display_name": "Rz",
+                "voice_channel_id": 555,
+                "voice_channel_name": "Lobby",
+                "session_date": "2026-09-03",
+            },
+            {
+                "guild_id": 99,
+                "user_id": 3,
+                "display_name": "Ahri",
+                "voice_channel_id": 888,
+                "voice_channel_name": "Ranked",
+                "session_date": "2026-09-03",
+            },
+        ]
+
+        started, closed = await self.store.reconcile_voice_sessions(connected)
+
+        self.assertEqual((1, 1), (started, closed))
+        self.store._close_voice_session_record.assert_awaited_once()
+        created_fields = self.store._create.await_args.args[1]
+        self.assertEqual("99:3", created_fields["Active Key"])
+        self.assertEqual("888", created_fields["Voice Channel ID"])
 
 
 if __name__ == "__main__":

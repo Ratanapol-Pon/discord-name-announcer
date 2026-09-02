@@ -323,6 +323,46 @@ class GamePollService:
                     )
         return False
 
+    async def track_voice_session(
+        self,
+        member: discord.Member,
+        before_channel: discord.abc.GuildChannel | None,
+        after_channel: discord.abc.GuildChannel | None,
+        session_date: date,
+    ) -> None:
+        """Persist joins, leaves, and channel moves for every human member."""
+        if before_channel is not None:
+            await self.store.stop_voice_session(member.guild.id, member.id)
+        if after_channel is not None:
+            await self.store.start_voice_session(
+                member.guild.id,
+                member.id,
+                member.display_name,
+                after_channel.id,
+                after_channel.name,
+                session_date,
+            )
+
+    async def reconcile_voice_sessions(self, session_date: date) -> tuple[int, int]:
+        """Reconcile Airtable sessions with members currently connected to voice."""
+        connected_members = []
+        for guild in self.bot.guilds:
+            for member in guild.members:
+                channel = getattr(getattr(member, "voice", None), "channel", None)
+                if member.bot or channel is None:
+                    continue
+                connected_members.append(
+                    {
+                        "guild_id": guild.id,
+                        "user_id": member.id,
+                        "display_name": member.display_name,
+                        "voice_channel_id": channel.id,
+                        "voice_channel_name": channel.name,
+                        "session_date": session_date.isoformat(),
+                    }
+                )
+        return await self.store.reconcile_voice_sessions(connected_members)
+
     async def generate_daily_reports(self, poll_date: date) -> None:
         for channel_id in self.channel_ids:
             try:
