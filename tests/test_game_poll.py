@@ -78,7 +78,7 @@ class GamePollUiTests(unittest.TestCase):
         self.assertEqual("Teemo", fields["🤔 Maybe (1)"])
         self.assertEqual("Ahri", fields["❌ No (1)"])
         self.assertIn("Working late", fields["Reasons from No votes"])
-        self.assertIn("Joined:** Rz", fields["🎧 Yes-voter voice attendance"])
+        self.assertNotIn("🎧 Yes-voter voice attendance", fields)
         self.assertIn("Saved to Airtable", embed.footer.text)
 
 

@@ -45,16 +45,6 @@ def _response_names(responses: Iterable[dict[str, Any]], choice: str) -> str:
     return ", ".join(names) if names else "—"
 
 
-def _attendance_names(responses: Iterable[dict[str, Any]], joined: bool) -> str:
-    names = [
-        discord.utils.escape_markdown(str(response["display_name"]))
-        for response in responses
-        if response["choice"] == "yes"
-        and bool(response.get("joined_voice_chat")) is joined
-    ]
-    return ", ".join(names) if names else "—"
-
-
 def report_embed(
     poll_date: date, timezone_name: str, report: dict[str, Any]
 ) -> discord.Embed:
@@ -91,14 +81,6 @@ def report_embed(
     if len(reason_text) > 1000:
         reason_text = reason_text[:997] + "..."
     embed.add_field(name="Reasons from No votes", value=reason_text, inline=False)
-    embed.add_field(
-        name="🎧 Yes-voter voice attendance",
-        value=(
-            f"**Joined:** {_attendance_names(responses, True)}\n"
-            f"**Not joined by report time:** {_attendance_names(responses, False)}"
-        ),
-        inline=False,
-    )
     embed.set_footer(text=f"Closed at 18:00 ({timezone_name}) • Saved to Airtable")
     return embed
 
