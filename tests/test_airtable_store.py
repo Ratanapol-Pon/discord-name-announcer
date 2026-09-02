@@ -270,6 +270,67 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("99:3", created_fields["Active Key"])
         self.assertEqual("888", created_fields["Voice Channel ID"])
 
+    async def test_solo_period_records_start_end_and_duration(self):
+        started_at = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        active_record = {
+            "id": "recSolo",
+            "fields": {
+                "Active Key": "99:555",
+                "User ID": "1",
+                "Started Alone At": started_at.isoformat(),
+            },
+        }
+        self.store._find_one = AsyncMock(side_effect=[None, active_record])
+        self.store._create = AsyncMock(return_value={"id": "recSolo"})
+        self.store._update = AsyncMock()
+        solo_member = {"user_id": 1, "display_name": "Rz"}
+
+        started = await self.store.sync_solo_voice_channel(
+            99,
+            555,
+            "Game Room",
+            solo_member,
+            date(2026, 9, 3),
+            changed_at=started_at,
+        )
+        closed = await self.store.sync_solo_voice_channel(
+            99,
+            555,
+            "Game Room",
+            None,
+            date(2026, 9, 3),
+            changed_at=started_at + timedelta(minutes=15),
+        )
+
+        self.assertEqual("started", started)
+        self.assertEqual("closed", closed)
+        created_fields = self.store._create.await_args.args[1]
+        self.assertEqual("99:555", created_fields["Active Key"])
+        self.assertEqual("1", created_fields["User ID"])
+        self.assertEqual("active", created_fields["Status"])
+        closed_fields = self.store._update.await_args.args[2]
+        self.assertEqual(900, closed_fields["Duration Seconds"])
+        self.assertEqual("closed", closed_fields["Status"])
+
+    async def test_same_solo_member_does_not_create_duplicate_period(self):
+        self.store._find_one = AsyncMock(
+            return_value={"id": "recSolo", "fields": {"User ID": "1"}}
+        )
+        self.store._create = AsyncMock()
+        self.store._update = AsyncMock()
+
+        result = await self.store.sync_solo_voice_channel(
+            99,
+            555,
+            "Game Room",
+            {"user_id": 1, "display_name": "Rz"},
+            date(2026, 9, 3),
+        )
+
+        self.assertEqual("unchanged", result)
+        self.store._create.assert_not_awaited()
+        self.store._update.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

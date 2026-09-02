@@ -9,6 +9,11 @@ Airtable: join time, leave time, channel, and duration in seconds. Moving to a
 different channel closes the old session and starts a new one. Bot accounts are
 excluded, and active sessions are reconciled after a Teemo restart.
 
+Teemo separately records **solo voice periods**. A solo period begins whenever
+exactly one human is in a channel and ends when another human joins or the solo
+person leaves. These records include the person, channel, start/end timestamps,
+and duration in seconds; bot accounts do not affect the solo count.
+
 It also runs a daily game poll:
 
 - **11:59 Asia/Bangkok:** asks whether anyone wants to play a game tonight.
@@ -75,6 +80,10 @@ Create a base named **Teemo Game Polls** with these tables and fields:
 - `Voice Sessions`: `Session Key` (primary text), `Active Key`, `Guild ID`,
   `User ID`, `Display Name`, `Voice Channel ID`, `Voice Channel Name`, `Joined
   At`, `Left At`, `Duration Seconds` (number), `Session Date`, and `Status`.
+- `Solo Voice Sessions`: `Solo Session Key` (primary text), `Active Key`,
+  `Guild ID`, `User ID`, `Display Name`, `Voice Channel ID`, `Voice Channel
+  Name`, `Started Alone At`, `Ended Alone At`, `Duration Seconds` (number),
+  `Session Date`, and `Status`.
 
 Create a personal access token restricted to this base with only
 `data.records:read` and `data.records:write`. Keep it server-side and never

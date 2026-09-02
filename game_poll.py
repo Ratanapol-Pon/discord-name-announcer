@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import discord
@@ -329,10 +329,13 @@ class GamePollService:
         before_channel: discord.abc.GuildChannel | None,
         after_channel: discord.abc.GuildChannel | None,
         session_date: date,
+        occurred_at: datetime | None = None,
     ) -> None:
         """Persist joins, leaves, and channel moves for every human member."""
         if before_channel is not None:
-            await self.store.stop_voice_session(member.guild.id, member.id)
+            await self.store.stop_voice_session(
+                member.guild.id, member.id, left_at=occurred_at
+            )
         if after_channel is not None:
             await self.store.start_voice_session(
                 member.guild.id,
@@ -341,6 +344,40 @@ class GamePollService:
                 after_channel.id,
                 after_channel.name,
                 session_date,
+                joined_at=occurred_at,
+            )
+
+    async def track_solo_voice_channels(
+        self,
+        channels: Iterable[discord.abc.GuildChannel | None],
+        session_date: date,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        """Update solo periods for voice channels affected by a state change."""
+        unique_channels = {
+            (channel.guild.id, channel.id): channel
+            for channel in channels
+            if channel is not None
+        }
+        channel_states = []
+        for channel in unique_channels.values():
+            humans = [member for member in channel.members if not member.bot]
+            solo_member = None
+            if len(humans) == 1:
+                solo_member = {
+                    "user_id": humans[0].id,
+                    "display_name": humans[0].display_name,
+                }
+            channel_states.append((channel, solo_member))
+
+        for channel, solo_member in channel_states:
+            await self.store.sync_solo_voice_channel(
+                channel.guild.id,
+                channel.id,
+                channel.name,
+                solo_member,
+                session_date,
+                changed_at=occurred_at,
             )
 
     async def reconcile_voice_sessions(self, session_date: date) -> tuple[int, int]:
@@ -362,6 +399,45 @@ class GamePollService:
                     }
                 )
         return await self.store.reconcile_voice_sessions(connected_members)
+
+    async def reconcile_solo_voice_sessions(
+        self, session_date: date
+    ) -> tuple[int, int]:
+        """Reconcile active solo periods with current Discord channel membership."""
+        channel_members: dict[tuple[int, int], dict[str, Any]] = {}
+        for guild in self.bot.guilds:
+            for member in guild.members:
+                channel = getattr(getattr(member, "voice", None), "channel", None)
+                if member.bot or channel is None:
+                    continue
+                key = (guild.id, channel.id)
+                entry = channel_members.setdefault(
+                    key,
+                    {
+                        "guild_id": guild.id,
+                        "voice_channel_id": channel.id,
+                        "voice_channel_name": channel.name,
+                        "members": [],
+                    },
+                )
+                entry["members"].append(member)
+
+        solo_channels = []
+        for entry in channel_members.values():
+            if len(entry["members"]) != 1:
+                continue
+            member = entry["members"][0]
+            solo_channels.append(
+                {
+                    "guild_id": entry["guild_id"],
+                    "voice_channel_id": entry["voice_channel_id"],
+                    "voice_channel_name": entry["voice_channel_name"],
+                    "user_id": member.id,
+                    "display_name": member.display_name,
+                    "session_date": session_date.isoformat(),
+                }
+            )
+        return await self.store.reconcile_solo_voice_sessions(solo_channels)
 
     async def generate_daily_reports(self, poll_date: date) -> None:
         for channel_id in self.channel_ids:

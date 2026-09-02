@@ -282,6 +282,19 @@ async def on_ready():
         except Exception:
             LOGGER.exception("Failed to reconcile active voice sessions")
             voice_session_status = "voice-session reconciliation failed"
+        try:
+            started_solo, closed_solo = (
+                await game_poll_service.reconcile_solo_voice_sessions(
+                    datetime.now(BOT_TIMEZONE).date()
+                )
+            )
+            solo_session_status = (
+                f"solo periods reconciled ({started_solo} started, "
+                f"{closed_solo} closed)"
+            )
+        except Exception:
+            LOGGER.exception("Failed to reconcile active solo voice periods")
+            solo_session_status = "solo-period reconciliation failed"
         poll_runtime_started = True
         daily_game_poll.start()
         daily_game_poll_report.start()
@@ -290,7 +303,7 @@ async def on_ready():
             f"✅ Daily game poll enabled at {POLL_CLOCK:%H:%M}; "
             f"report at {REPORT_CLOCK:%H:%M} ({TIMEZONE_NAME}); "
             f"restored {restored_views} open poll view(s); "
-            f"{voice_session_status}"
+            f"{voice_session_status}; {solo_session_status}"
         )
 
 
@@ -306,11 +319,20 @@ async def on_voice_state_update(
     if before.channel == after.channel:
         return
 
-    local_date = datetime.now(BOT_TIMEZONE).date()
+    event_time = datetime.now(BOT_TIMEZONE)
+    local_date = event_time.date()
     if game_poll_service:
         try:
+            await game_poll_service.track_solo_voice_channels(
+                (before.channel, after.channel), local_date, event_time
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to record solo voice period for Discord user %s", member.id
+            )
+        try:
             await game_poll_service.track_voice_session(
-                member, before.channel, after.channel, local_date
+                member, before.channel, after.channel, local_date, event_time
             )
         except Exception:
             LOGGER.exception(

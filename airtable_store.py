@@ -17,6 +17,7 @@ POLLS_TABLE = "Polls"
 RESPONSES_TABLE = "Responses"
 REPORTS_TABLE = "Reports"
 VOICE_SESSIONS_TABLE = "Voice Sessions"
+SOLO_VOICE_SESSIONS_TABLE = "Solo Voice Sessions"
 MIN_REQUEST_INTERVAL_SECONDS = 0.22  # Airtable limit: 5 requests/second/base.
 PLAY_TIME_OPTIONS = (
     "Flexible",
@@ -51,6 +52,7 @@ class AirtablePollStore:
         self._base_id = base_id
         self._request_lock = asyncio.Lock()
         self._voice_session_lock = asyncio.Lock()
+        self._solo_voice_session_lock = asyncio.Lock()
         self._last_request_at = 0.0
 
     def _table_url(self, table: str, record_id: str | None = None) -> str:
@@ -145,6 +147,9 @@ class AirtablePollStore:
     async def healthcheck(self) -> None:
         await self._request("GET", POLLS_TABLE, params={"maxRecords": 1})
         await self._request("GET", VOICE_SESSIONS_TABLE, params={"maxRecords": 1})
+        await self._request(
+            "GET", SOLO_VOICE_SESSIONS_TABLE, params={"maxRecords": 1}
+        )
 
     @staticmethod
     def _voice_active_key(guild_id: int, user_id: int) -> str:
@@ -316,6 +321,166 @@ class AirtablePollStore:
                 )
                 if record:
                     started += 1
+
+        return started, closed
+
+    @staticmethod
+    def _solo_voice_active_key(guild_id: int, voice_channel_id: int) -> str:
+        return f"{guild_id}:{voice_channel_id}"
+
+    async def _close_solo_voice_session_record(
+        self, record: dict[str, Any], ended_at: datetime
+    ) -> int:
+        fields = record.get("fields") or {}
+        started_text = fields.get("Started Alone At")
+        try:
+            started_at = datetime.fromisoformat(
+                str(started_text).replace("Z", "+00:00")
+            )
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            duration_seconds = max(
+                0,
+                int(
+                    (ended_at - started_at.astimezone(timezone.utc)).total_seconds()
+                ),
+            )
+        except (TypeError, ValueError):
+            duration_seconds = 0
+
+        await self._update(
+            SOLO_VOICE_SESSIONS_TABLE,
+            record["id"],
+            {
+                "Active Key": "",
+                "Ended Alone At": ended_at.isoformat(),
+                "Duration Seconds": duration_seconds,
+                "Status": "closed",
+            },
+        )
+        return duration_seconds
+
+    async def sync_solo_voice_channel(
+        self,
+        guild_id: int,
+        voice_channel_id: int,
+        voice_channel_name: str,
+        solo_member: dict[str, Any] | None,
+        session_date: date,
+        *,
+        changed_at: datetime | None = None,
+    ) -> str:
+        """Synchronize one channel's solo period after membership changes."""
+        changed_at = self._utc_timestamp(changed_at)
+        active_key = self._solo_voice_active_key(guild_id, voice_channel_id)
+        async with self._solo_voice_session_lock:
+            existing = await self._find_one(
+                SOLO_VOICE_SESSIONS_TABLE, "Active Key", active_key
+            )
+            if solo_member is None:
+                if not existing:
+                    return "unchanged"
+                await self._close_solo_voice_session_record(existing, changed_at)
+                return "closed"
+
+            if existing:
+                fields = existing.get("fields") or {}
+                if fields.get("User ID") == str(solo_member["user_id"]):
+                    return "unchanged"
+                await self._close_solo_voice_session_record(existing, changed_at)
+
+            await self._create(
+                SOLO_VOICE_SESSIONS_TABLE,
+                {
+                    "Solo Session Key": (
+                        f"{active_key}:{solo_member['user_id']}:"
+                        f"{changed_at.isoformat(timespec='microseconds')}"
+                    ),
+                    "Active Key": active_key,
+                    "Guild ID": str(guild_id),
+                    "User ID": str(solo_member["user_id"]),
+                    "Display Name": str(solo_member["display_name"])[:100],
+                    "Voice Channel ID": str(voice_channel_id),
+                    "Voice Channel Name": voice_channel_name[:100],
+                    "Started Alone At": changed_at.isoformat(),
+                    "Ended Alone At": "",
+                    "Duration Seconds": 0,
+                    "Session Date": session_date.isoformat(),
+                    "Status": "active",
+                },
+            )
+            return "started"
+
+    async def _get_active_solo_voice_sessions(self) -> list[dict[str, Any]]:
+        params: dict[str, str | int] = {
+            "pageSize": 100,
+            "filterByFormula": self._formula_equals("Status", "active"),
+        }
+        records: list[dict[str, Any]] = []
+        while True:
+            result = await self._request(
+                "GET", SOLO_VOICE_SESSIONS_TABLE, params=params
+            )
+            records.extend(result.get("records") or [])
+            offset = result.get("offset")
+            if not offset:
+                return records
+            params["offset"] = offset
+
+    async def reconcile_solo_voice_sessions(
+        self,
+        solo_channels: list[dict[str, Any]],
+        *,
+        reconciled_at: datetime | None = None,
+    ) -> tuple[int, int]:
+        """Make active solo periods match Discord after a bot restart."""
+        reconciled_at = self._utc_timestamp(reconciled_at)
+        current = {
+            self._solo_voice_active_key(item["guild_id"], item["voice_channel_id"]): item
+            for item in solo_channels
+        }
+        started = 0
+        closed = 0
+        retained: set[str] = set()
+
+        async with self._solo_voice_session_lock:
+            for record in await self._get_active_solo_voice_sessions():
+                fields = record.get("fields") or {}
+                active_key = fields.get("Active Key")
+                member = current.get(active_key)
+                same_member = member and fields.get("User ID") == str(
+                    member["user_id"]
+                )
+                if same_member and active_key not in retained:
+                    retained.add(active_key)
+                    continue
+                await self._close_solo_voice_session_record(record, reconciled_at)
+                closed += 1
+
+            for active_key, member in current.items():
+                if active_key in retained:
+                    continue
+                await self._create(
+                    SOLO_VOICE_SESSIONS_TABLE,
+                    {
+                        "Solo Session Key": (
+                            f"{active_key}:{member['user_id']}:"
+                            f"{reconciled_at.isoformat(timespec='microseconds')}"
+                        ),
+                        "Active Key": active_key,
+                        "Guild ID": str(member["guild_id"]),
+                        "User ID": str(member["user_id"]),
+                        "Display Name": str(member["display_name"])[:100],
+                        "Voice Channel ID": str(member["voice_channel_id"]),
+                        "Voice Channel Name": str(member["voice_channel_name"])[:100],
+                        "Started Alone At": reconciled_at.isoformat(),
+                        "Ended Alone At": "",
+                        "Duration Seconds": 0,
+                        "Session Date": str(member["session_date"]),
+                        "Status": "active",
+                    },
+                )
+                started += 1
 
         return started, closed
 

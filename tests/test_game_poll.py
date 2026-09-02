@@ -182,9 +182,64 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
             member, old_channel, new_channel, date(2026, 9, 3)
         )
 
-        self.store.stop_voice_session.assert_awaited_once_with(99, 1)
+        self.store.stop_voice_session.assert_awaited_once_with(99, 1, left_at=None)
         self.store.start_voice_session.assert_awaited_once_with(
-            99, 1, "Rz", 777, "Game Room", date(2026, 9, 3)
+            99,
+            1,
+            "Rz",
+            777,
+            "Game Room",
+            date(2026, 9, 3),
+            joined_at=None,
+        )
+
+    async def test_solo_channel_state_uses_only_human_members(self):
+        self.store.sync_solo_voice_channel = AsyncMock(return_value="started")
+        solo_member = SimpleNamespace(id=1, display_name="Rz", bot=False)
+        bot_member = SimpleNamespace(id=2, display_name="Teemo", bot=True)
+        channel = SimpleNamespace(
+            id=555,
+            name="Game Room",
+            guild=SimpleNamespace(id=99),
+            members=[solo_member, bot_member],
+        )
+
+        await self.service.track_solo_voice_channels(
+            (channel,), date(2026, 9, 3)
+        )
+
+        self.store.sync_solo_voice_channel.assert_awaited_once_with(
+            99,
+            555,
+            "Game Room",
+            {"user_id": 1, "display_name": "Rz"},
+            date(2026, 9, 3),
+            changed_at=None,
+        )
+
+    async def test_non_solo_channel_closes_active_solo_period(self):
+        self.store.sync_solo_voice_channel = AsyncMock(return_value="closed")
+        channel = SimpleNamespace(
+            id=555,
+            name="Game Room",
+            guild=SimpleNamespace(id=99),
+            members=[
+                SimpleNamespace(id=1, display_name="Rz", bot=False),
+                SimpleNamespace(id=2, display_name="Ahri", bot=False),
+            ],
+        )
+
+        await self.service.track_solo_voice_channels(
+            (channel,), date(2026, 9, 3)
+        )
+
+        self.store.sync_solo_voice_channel.assert_awaited_once_with(
+            99,
+            555,
+            "Game Room",
+            None,
+            date(2026, 9, 3),
+            changed_at=None,
         )
 
     async def test_report_closes_before_snapshot_and_disables_poll(self):
