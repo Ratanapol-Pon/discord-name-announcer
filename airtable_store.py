@@ -18,6 +18,7 @@ RESPONSES_TABLE = "Responses"
 REPORTS_TABLE = "Reports"
 VOICE_SESSIONS_TABLE = "Voice Sessions"
 SOLO_VOICE_SESSIONS_TABLE = "Solo Voice Sessions"
+BOT_SETTINGS_TABLE = "Bot Settings"
 MIN_REQUEST_INTERVAL_SECONDS = 0.22  # Airtable limit: 5 requests/second/base.
 PLAY_TIME_OPTIONS = (
     "Flexible",
@@ -53,6 +54,7 @@ class AirtablePollStore:
         self._request_lock = asyncio.Lock()
         self._voice_session_lock = asyncio.Lock()
         self._solo_voice_session_lock = asyncio.Lock()
+        self._settings_lock = asyncio.Lock()
         self._last_request_at = 0.0
 
     def _table_url(self, table: str, record_id: str | None = None) -> str:
@@ -150,6 +152,70 @@ class AirtablePollStore:
         await self._request(
             "GET", SOLO_VOICE_SESSIONS_TABLE, params={"maxRecords": 1}
         )
+        await self._request("GET", BOT_SETTINGS_TABLE, params={"maxRecords": 1})
+
+    async def get_bot_settings(self) -> dict[str, Any] | None:
+        """Return the global Discord-admin settings record, if configured."""
+        record = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", "global")
+        if not record:
+            return None
+
+        fields = record.get("fields") or {}
+        raw_channel_ids = str(fields.get("Poll Channel IDs") or "")
+        try:
+            poll_channel_ids = [
+                int(item.strip())
+                for item in raw_channel_ids.split(",")
+                if item.strip()
+            ]
+            announcement_channel_id = (
+                int(fields["Announcement Channel ID"])
+                if fields.get("Announcement Channel ID")
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Bot Settings contains an invalid Discord channel ID."
+            ) from exc
+
+        return {
+            "poll_time": fields.get("Poll Time"),
+            "report_time": fields.get("Report Time"),
+            "poll_channel_ids": list(dict.fromkeys(poll_channel_ids)),
+            "announcement_channel_id": announcement_channel_id,
+            "updated_at": fields.get("Updated At"),
+            "updated_by": fields.get("Updated By"),
+        }
+
+    async def save_bot_settings(
+        self,
+        *,
+        poll_time: str,
+        report_time: str,
+        poll_channel_ids: list[int],
+        announcement_channel_id: int | None,
+        updated_by: str,
+    ) -> None:
+        """Upsert the global settings changed through Teemo's admin panel."""
+        fields = {
+            "Setting Key": "global",
+            "Poll Time": poll_time,
+            "Report Time": report_time,
+            "Poll Channel IDs": ",".join(str(value) for value in poll_channel_ids),
+            "Announcement Channel ID": (
+                str(announcement_channel_id) if announcement_channel_id else ""
+            ),
+            "Updated At": datetime.now(timezone.utc).isoformat(),
+            "Updated By": updated_by[:100],
+        }
+        async with self._settings_lock:
+            existing = await self._find_one(
+                BOT_SETTINGS_TABLE, "Setting Key", "global"
+            )
+            if existing:
+                await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
+            else:
+                await self._create(BOT_SETTINGS_TABLE, fields)
 
     @staticmethod
     def _voice_active_key(guild_id: int, user_id: int) -> str:

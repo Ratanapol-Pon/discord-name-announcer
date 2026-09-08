@@ -13,6 +13,31 @@ import bot
 
 
 class ClipSourceTests(unittest.IsolatedAsyncioTestCase):
+    def test_admin_panel_command_and_controls_exist(self):
+        command = bot.bot.tree.get_command("teemo_admin")
+        view = bot.AdminPanelView(admin_id=1, guild_id=2, channel_id=3)
+
+        self.assertIsNotNone(command)
+        self.assertEqual(
+            {
+                "Schedule",
+                "Post Poll Now",
+                "Report Now",
+                "Create News",
+                "Announcement",
+            },
+            {item.label for item in view.children},
+        )
+
+    def test_clock_parser_requires_exact_24_hour_format(self):
+        self.assertEqual("09:05", bot._clock_from_text("09:05").strftime("%H:%M"))
+        for invalid in ("9:05", "09:5", "24:00", "noon"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                bot._clock_from_text(invalid)
+
+    def test_channel_parser_deduplicates_ids(self):
+        self.assertEqual([123, 456], bot._parse_channel_ids("123, 456,123"))
+
     def test_setclip_exposes_optional_attachment_and_url(self):
         command = bot.bot.tree.get_command("setclip")
         parameters = {parameter.name: parameter for parameter in command.parameters}

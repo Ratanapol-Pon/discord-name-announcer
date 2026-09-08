@@ -38,11 +38,25 @@ if not TOKEN:
     raise SystemExit("Missing DISCORD_TOKEN. Put it in a .env file (see .env.example).")
 
 
+def _clock_from_text(value: str) -> clock_time:
+    if (
+        not isinstance(value, str)
+        or len(value) != 5
+        or value[2] != ":"
+        or not value[:2].isdigit()
+        or not value[3:].isdigit()
+    ):
+        raise ValueError("Time must use 24-hour HH:MM format.")
+    try:
+        return clock_time(hour=int(value[:2]), minute=int(value[3:]))
+    except ValueError as exc:
+        raise ValueError("Time must use 24-hour HH:MM format.") from exc
+
+
 def _parse_clock(value: str, variable_name: str) -> clock_time:
     try:
-        hour, minute = (int(part) for part in value.split(":"))
-        return clock_time(hour=hour, minute=minute)
-    except (TypeError, ValueError) as exc:
+        return _clock_from_text(value)
+    except ValueError as exc:
         raise SystemExit(f"{variable_name} must use 24-hour HH:MM format.") from exc
 
 
@@ -92,6 +106,9 @@ last_announce: dict[int, float] = {}  # member_id -> unix time
 guild_locks: dict[int, asyncio.Lock] = {}  # one playback at a time per server
 game_poll_service: GamePollService | None = None
 poll_runtime_started = False
+active_poll_clock = POLL_CLOCK
+active_report_clock = REPORT_CLOCK
+announcement_channel_id: int | None = None
 
 
 def _poll_channel_ids() -> list[int]:
@@ -121,8 +138,87 @@ def configure_game_poll() -> None:
         raise SystemExit("Missing AIRTABLE_BASE_ID.")
 
     store = AirtablePollStore(airtable_token, airtable_base_id)
-    game_poll_service = GamePollService(bot, store, _poll_channel_ids(), TIMEZONE_NAME)
+    game_poll_service = GamePollService(
+        bot,
+        store,
+        _poll_channel_ids(),
+        TIMEZONE_NAME,
+        f"{active_report_clock:%H:%M}",
+    )
     bot.add_view(GamePollView(game_poll_service))
+
+
+def _parse_channel_ids(value: str) -> list[int]:
+    try:
+        channel_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError("Channel IDs must be numbers separated by commas.") from exc
+    if not channel_ids:
+        raise ValueError("At least one poll channel ID is required.")
+    return list(dict.fromkeys(channel_ids))
+
+
+async def _get_guild_message_channel(
+    channel_id: int, guild_id: int
+) -> discord.abc.Messageable:
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        channel = await bot.fetch_channel(channel_id)
+    if (
+        not isinstance(channel, discord.abc.Messageable)
+        or getattr(getattr(channel, "guild", None), "id", None) != guild_id
+    ):
+        raise ValueError(f"{channel_id} is not a text channel in this server.")
+    return channel
+
+
+def _apply_runtime_settings(
+    poll_clock: clock_time,
+    report_clock: clock_time,
+    poll_channel_ids: list[int],
+    post_channel_id: int | None,
+) -> None:
+    """Apply validated settings without restarting Teemo."""
+    global active_poll_clock, active_report_clock, announcement_channel_id
+
+    if report_clock <= poll_clock:
+        raise ValueError("Report time must be later than poll time on the same day.")
+    if not poll_channel_ids:
+        raise ValueError("At least one poll channel is required.")
+
+    active_poll_clock = poll_clock
+    active_report_clock = report_clock
+    announcement_channel_id = post_channel_id
+    if game_poll_service:
+        game_poll_service.channel_ids = list(dict.fromkeys(poll_channel_ids))
+        game_poll_service.report_time = f"{report_clock:%H:%M}"
+
+    daily_game_poll.change_interval(time=poll_clock.replace(tzinfo=BOT_TIMEZONE))
+    daily_game_poll_report.change_interval(
+        time=report_clock.replace(tzinfo=BOT_TIMEZONE)
+    )
+
+
+async def _load_runtime_settings() -> None:
+    if not game_poll_service:
+        return
+    settings = await game_poll_service.store.get_bot_settings()
+    if not settings:
+        return
+
+    poll_clock = _clock_from_text(
+        settings.get("poll_time") or f"{active_poll_clock:%H:%M}"
+    )
+    report_clock = _clock_from_text(
+        settings.get("report_time") or f"{active_report_clock:%H:%M}"
+    )
+    channel_ids = settings.get("poll_channel_ids") or game_poll_service.channel_ids
+    _apply_runtime_settings(
+        poll_clock,
+        report_clock,
+        channel_ids,
+        settings.get("announcement_channel_id"),
+    )
 
 
 def clip_path(user_id: int) -> str | None:
@@ -245,9 +341,9 @@ async def _catch_up_game_poll_schedule() -> None:
         return
     now = datetime.now(BOT_TIMEZONE)
     local_clock = now.time().replace(tzinfo=None)
-    if POLL_CLOCK <= local_clock < REPORT_CLOCK:
+    if active_poll_clock <= local_clock < active_report_clock:
         await game_poll_service.post_daily_polls(now.date())
-    elif local_clock >= REPORT_CLOCK:
+    elif local_clock >= active_report_clock:
         await game_poll_service.generate_daily_reports(now.date())
 
 
@@ -266,6 +362,12 @@ async def on_ready():
                 "Airtable health check failed. Verify the base schema and access token."
             )
             return
+        try:
+            await _load_runtime_settings()
+        except Exception:
+            LOGGER.exception(
+                "Stored Teemo settings are invalid; using environment defaults."
+            )
         restored_views = await game_poll_service.restore_open_poll_views(
             datetime.now(BOT_TIMEZONE).date()
         )
@@ -300,8 +402,8 @@ async def on_ready():
         daily_game_poll_report.start()
         asyncio.create_task(_catch_up_game_poll_schedule())
         print(
-            f"✅ Daily game poll enabled at {POLL_CLOCK:%H:%M}; "
-            f"report at {REPORT_CLOCK:%H:%M} ({TIMEZONE_NAME}); "
+            f"✅ Daily game poll enabled at {active_poll_clock:%H:%M}; "
+            f"report at {active_report_clock:%H:%M} ({TIMEZONE_NAME}); "
             f"restored {restored_views} open poll view(s); "
             f"{voice_session_status}; {solo_session_status}"
         )
@@ -402,6 +504,308 @@ async def announce(channel: discord.VoiceChannel, path: str):
 
 
 # ---------------------------------------------------------------- commands
+
+
+def _is_administrator(user: discord.abc.User) -> bool:
+    permissions = getattr(user, "guild_permissions", None)
+    return bool(getattr(permissions, "administrator", False))
+
+
+def _admin_panel_embed(current_channel_id: int) -> discord.Embed:
+    poll_channels = (
+        game_poll_service.channel_ids if game_poll_service else _poll_channel_ids()
+    )
+    post_channel_id = announcement_channel_id or current_channel_id
+    embed = discord.Embed(
+        title="Teemo Admin Panel",
+        description="Manage the daily game poll and publish server updates.",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="Daily schedule",
+        value=(
+            f"Poll: **{active_poll_clock:%H:%M}**\n"
+            f"Summary: **{active_report_clock:%H:%M}**\n"
+            f"Timezone: **{TIMEZONE_NAME}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Channels",
+        value=(
+            "Poll: " + ", ".join(f"<#{channel_id}>" for channel_id in poll_channels)
+            + f"\nNews / announcements: <#{post_channel_id}>"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="Only the administrator who opened this panel can use it.")
+    return embed
+
+
+class ScheduleModal(discord.ui.Modal, title="Adjust Teemo's daily tasks"):
+    def __init__(self, guild_id: int, admin_id: int, current_channel_id: int) -> None:
+        super().__init__()
+        self.guild_id = guild_id
+        self.admin_id = admin_id
+        poll_channels = (
+            game_poll_service.channel_ids if game_poll_service else _poll_channel_ids()
+        )
+        self.poll_time = discord.ui.TextInput(
+            label="Daily poll time (HH:MM)",
+            default=f"{active_poll_clock:%H:%M}",
+            min_length=5,
+            max_length=5,
+        )
+        self.report_time = discord.ui.TextInput(
+            label="Daily summary time (HH:MM)",
+            default=f"{active_report_clock:%H:%M}",
+            min_length=5,
+            max_length=5,
+        )
+        self.poll_channels = discord.ui.TextInput(
+            label="Poll channel ID(s), comma-separated",
+            default=",".join(str(value) for value in poll_channels),
+            max_length=300,
+        )
+        self.post_channel = discord.ui.TextInput(
+            label="News / announcement channel ID",
+            default=str(announcement_channel_id or current_channel_id),
+            max_length=20,
+        )
+        self.add_item(self.poll_time)
+        self.add_item(self.report_time)
+        self.add_item(self.poll_channels)
+        self.add_item(self.post_channel)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.user.id != self.admin_id or not _is_administrator(
+            interaction.user
+        ):
+            await interaction.followup.send(
+                "This panel can only be used by the administrator who opened it.",
+                ephemeral=True,
+            )
+            return
+        if not game_poll_service:
+            await interaction.followup.send(
+                "The game poll service is not configured.", ephemeral=True
+            )
+            return
+
+        try:
+            poll_clock = _clock_from_text(str(self.poll_time.value).strip())
+            report_clock = _clock_from_text(str(self.report_time.value).strip())
+            channel_ids = _parse_channel_ids(str(self.poll_channels.value))
+            post_channel_id = int(str(self.post_channel.value).strip())
+            if report_clock <= poll_clock:
+                raise ValueError(
+                    "Summary time must be later than poll time on the same day."
+                )
+            for channel_id in list(dict.fromkeys(channel_ids + [post_channel_id])):
+                await _get_guild_message_channel(channel_id, self.guild_id)
+
+            await game_poll_service.store.save_bot_settings(
+                poll_time=f"{poll_clock:%H:%M}",
+                report_time=f"{report_clock:%H:%M}",
+                poll_channel_ids=channel_ids,
+                announcement_channel_id=post_channel_id,
+                updated_by=f"{interaction.user} ({interaction.user.id})",
+            )
+            _apply_runtime_settings(
+                poll_clock, report_clock, channel_ids, post_channel_id
+            )
+            await _catch_up_game_poll_schedule()
+            await interaction.followup.send(
+                "Settings saved to Airtable and applied immediately.\n"
+                f"Poll: **{poll_clock:%H:%M}** • Summary: **{report_clock:%H:%M}**",
+                ephemeral=True,
+            )
+        except (TypeError, ValueError, discord.HTTPException) as exc:
+            await interaction.followup.send(
+                f"Could not save settings: {exc}", ephemeral=True
+            )
+        except Exception:
+            LOGGER.exception("Failed to update Teemo admin settings")
+            await interaction.followup.send(
+                "I couldn't save those settings. Please try again.", ephemeral=True
+            )
+
+
+class PublishPostModal(discord.ui.Modal):
+    def __init__(
+        self, kind: str, guild_id: int, admin_id: int, fallback_channel_id: int
+    ) -> None:
+        super().__init__(title=f"Create {kind}")
+        self.kind = kind
+        self.guild_id = guild_id
+        self.admin_id = admin_id
+        self.target_channel_id = announcement_channel_id or fallback_channel_id
+        self.heading = discord.ui.TextInput(
+            label=f"{kind.title()} title", max_length=200
+        )
+        self.body = discord.ui.TextInput(
+            label="Message",
+            style=discord.TextStyle.paragraph,
+            max_length=4000,
+        )
+        self.add_item(self.heading)
+        self.add_item(self.body)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if interaction.user.id != self.admin_id or not _is_administrator(
+            interaction.user
+        ):
+            await interaction.followup.send(
+                "This panel can only be used by the administrator who opened it.",
+                ephemeral=True,
+            )
+            return
+        try:
+            channel = await _get_guild_message_channel(
+                self.target_channel_id, self.guild_id
+            )
+            color = (
+                discord.Color.blue()
+                if self.kind == "news"
+                else discord.Color.orange()
+            )
+            embed = discord.Embed(
+                title=str(self.heading.value).strip(),
+                description=str(self.body.value).strip(),
+                color=color,
+                timestamp=datetime.now(BOT_TIMEZONE),
+            )
+            embed.set_footer(text=f"Teemo {self.kind.title()}")
+            message = await channel.send(
+                embed=embed, allowed_mentions=discord.AllowedMentions.none()
+            )
+            await interaction.followup.send(
+                f"{self.kind.title()} posted in <#{self.target_channel_id}>: "
+                f"{message.jump_url}",
+                ephemeral=True,
+            )
+        except (ValueError, discord.HTTPException) as exc:
+            await interaction.followup.send(
+                f"Could not post the {self.kind}: {exc}", ephemeral=True
+            )
+        except Exception:
+            LOGGER.exception("Failed to publish Teemo %s", self.kind)
+            await interaction.followup.send(
+                f"I couldn't post the {self.kind}. Please try again.", ephemeral=True
+            )
+
+
+class AdminPanelView(discord.ui.View):
+    def __init__(self, admin_id: int, guild_id: int, channel_id: int) -> None:
+        super().__init__(timeout=600)
+        self.admin_id = admin_id
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and _is_administrator(
+            interaction.user
+        ):
+            return True
+        await interaction.response.send_message(
+            "This panel can only be used by the administrator who opened it.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Schedule", style=discord.ButtonStyle.secondary)
+    async def schedule(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(
+            ScheduleModal(self.guild_id, self.admin_id, self.channel_id)
+        )
+
+    @discord.ui.button(label="Post Poll Now", style=discord.ButtonStyle.success)
+    async def post_poll(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not game_poll_service:
+            await interaction.followup.send(
+                "The game poll service is not configured.", ephemeral=True
+            )
+            return
+        created = await game_poll_service.post_daily_polls(
+            datetime.now(BOT_TIMEZONE).date()
+        )
+        message = (
+            f"Posted today's poll in **{created}** configured channel(s)."
+            if created
+            else (
+                "No new poll was posted; today's poll already exists or a "
+                "channel failed."
+            )
+        )
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Report Now", style=discord.ButtonStyle.primary)
+    async def post_report(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not game_poll_service:
+            await interaction.followup.send(
+                "The game poll service is not configured.", ephemeral=True
+            )
+            return
+        generated = await game_poll_service.generate_daily_reports(
+            datetime.now(BOT_TIMEZONE).date()
+        )
+        message = (
+            f"Posted today's summary in **{generated}** configured channel(s)."
+            if generated
+            else (
+                "No new summary was posted; there is no open poll or it "
+                "already exists."
+            )
+        )
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Create News", style=discord.ButtonStyle.primary)
+    async def create_news(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(
+            PublishPostModal("news", self.guild_id, self.admin_id, self.channel_id)
+        )
+
+    @discord.ui.button(label="Announcement", style=discord.ButtonStyle.danger)
+    async def create_announcement(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(
+            PublishPostModal(
+                "announcement", self.guild_id, self.admin_id, self.channel_id
+            )
+        )
+
+
+@bot.tree.command(
+    name="teemo_admin",
+    description="Open Teemo's private bot-management panel (admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def teemo_admin(interaction: discord.Interaction):
+    if not interaction.guild_id or not interaction.channel_id:
+        await interaction.response.send_message(
+            "Open this panel from a server text channel.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(
+        embed=_admin_panel_embed(interaction.channel_id),
+        view=AdminPanelView(
+            interaction.user.id, interaction.guild_id, interaction.channel_id
+        ),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(
@@ -565,6 +969,7 @@ async def clips(interaction: discord.Interaction):
 @clips.error
 @gamepoll_test.error
 @gamepoll_test_report.error
+@teemo_admin.error
 async def admin_only_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.errors.MissingPermissions):
         await interaction.response.send_message("❌ Admins only.", ephemeral=True)

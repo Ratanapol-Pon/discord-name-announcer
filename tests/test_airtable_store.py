@@ -13,6 +13,44 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         formula = self.store._formula_equals("Poll Key", "a\\b'c")
         self.assertEqual("{Poll Key}='a\\\\b\\'c'", formula)
 
+    async def test_bot_settings_are_loaded_and_channel_ids_are_deduplicated(self):
+        self.store._find_one = AsyncMock(
+            return_value={
+                "id": "recSettings",
+                "fields": {
+                    "Poll Time": "11:59",
+                    "Report Time": "17:00",
+                    "Poll Channel IDs": "123,456,123",
+                    "Announcement Channel ID": "789",
+                    "Updated By": "Rz",
+                },
+            }
+        )
+
+        settings = await self.store.get_bot_settings()
+
+        self.assertEqual([123, 456], settings["poll_channel_ids"])
+        self.assertEqual(789, settings["announcement_channel_id"])
+        self.assertEqual("17:00", settings["report_time"])
+
+    async def test_bot_settings_update_the_global_record(self):
+        self.store._find_one = AsyncMock(return_value={"id": "recSettings"})
+        self.store._update = AsyncMock()
+
+        await self.store.save_bot_settings(
+            poll_time="12:00",
+            report_time="17:30",
+            poll_channel_ids=[123, 456],
+            announcement_channel_id=789,
+            updated_by="Rz (1)",
+        )
+
+        fields = self.store._update.await_args.args[2]
+        self.assertEqual("global", fields["Setting Key"])
+        self.assertEqual("12:00", fields["Poll Time"])
+        self.assertEqual("123,456", fields["Poll Channel IDs"])
+        self.assertEqual("789", fields["Announcement Channel ID"])
+
     async def test_create_poll_uses_text_ids_and_stable_key(self):
         self.store.get_poll = AsyncMock(return_value=None)
         self.store._create = AsyncMock(

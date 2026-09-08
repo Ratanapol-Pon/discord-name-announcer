@@ -21,7 +21,9 @@ LOGGER = logging.getLogger(__name__)
 POLL_QUESTION = "Does anyone want to play any game tonight?"
 
 
-def poll_embed(poll_date: date, timezone_name: str) -> discord.Embed:
+def poll_embed(
+    poll_date: date, timezone_name: str, report_time: str = "17:00"
+) -> discord.Embed:
     embed = discord.Embed(
         title="Tonight's game poll",
         description=POLL_QUESTION,
@@ -37,7 +39,10 @@ def poll_embed(poll_date: date, timezone_name: str) -> discord.Embed:
         inline=False,
     )
     embed.set_footer(
-        text=f"Closes at 17:00 ({timezone_name}) • {poll_date.isoformat()} • You can change your vote"
+        text=(
+            f"Closes at {report_time} ({timezone_name}) • {poll_date.isoformat()} "
+            "• You can change your vote"
+        )
     )
     return embed
 
@@ -56,7 +61,10 @@ def _response_names(responses: Iterable[dict[str, Any]], choice: str) -> str:
 
 
 def report_embed(
-    poll_date: date, timezone_name: str, report: dict[str, Any]
+    poll_date: date,
+    timezone_name: str,
+    report: dict[str, Any],
+    report_time: str = "17:00",
 ) -> discord.Embed:
     responses = list(report.get("responses") or [])
     embed = discord.Embed(
@@ -91,7 +99,9 @@ def report_embed(
     if len(reason_text) > 1000:
         reason_text = reason_text[:997] + "..."
     embed.add_field(name="Reasons from No votes", value=reason_text, inline=False)
-    embed.set_footer(text=f"Closed at 17:00 ({timezone_name}) • Saved to Airtable")
+    embed.set_footer(
+        text=f"Closed at {report_time} ({timezone_name}) • Saved to Airtable"
+    )
     return embed
 
 
@@ -208,11 +218,13 @@ class GamePollService:
         store: AirtablePollStore,
         channel_ids: list[int],
         timezone_name: str,
+        report_time: str = "17:00",
     ) -> None:
         self.bot = bot
         self.store = store
         self.channel_ids = channel_ids
         self.timezone_name = timezone_name
+        self.report_time = report_time
         self._poll_lifecycle_lock = asyncio.Lock()
 
     async def _get_channel(self, channel_id: int) -> discord.abc.Messageable:
@@ -227,12 +239,14 @@ class GamePollService:
             )
         return channel
 
-    async def post_daily_polls(self, poll_date: date) -> None:
+    async def post_daily_polls(self, poll_date: date) -> int:
+        created = 0
         for channel_id in self.channel_ids:
             try:
-                await self.post_poll(channel_id, poll_date)
+                created += int(await self.post_poll(channel_id, poll_date))
             except Exception:
                 LOGGER.exception("Failed to post game poll in channel %s", channel_id)
+        return created
 
     async def restore_open_poll_views(self, poll_date: date) -> int:
         """Bind persisted button views to today's open poll messages."""
@@ -254,7 +268,7 @@ class GamePollService:
             return False
 
         message = await channel.send(
-            embed=poll_embed(poll_date, self.timezone_name),
+            embed=poll_embed(poll_date, self.timezone_name, self.report_time),
             view=GamePollView(self),
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -439,14 +453,16 @@ class GamePollService:
             )
         return await self.store.reconcile_solo_voice_sessions(solo_channels)
 
-    async def generate_daily_reports(self, poll_date: date) -> None:
+    async def generate_daily_reports(self, poll_date: date) -> int:
+        generated = 0
         for channel_id in self.channel_ids:
             try:
-                await self.generate_report(channel_id, poll_date)
+                generated += int(await self.generate_report(channel_id, poll_date))
             except Exception:
                 LOGGER.exception(
                     "Failed to generate game-poll report for channel %s", channel_id
                 )
+        return generated
 
     async def generate_report(self, channel_id: int, poll_date: date) -> bool:
         channel = await self._get_channel(channel_id)
@@ -474,7 +490,9 @@ class GamePollService:
             )
 
         summary_message = await channel.send(
-            embed=report_embed(poll_date, self.timezone_name, report),
+            embed=report_embed(
+                poll_date, self.timezone_name, report, self.report_time
+            ),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.store.set_report_message(poll["id"], summary_message.id)

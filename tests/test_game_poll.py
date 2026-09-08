@@ -45,10 +45,10 @@ class GamePollUiTests(unittest.TestCase):
         self.assertEqual("23:30", select.options[-1].value)
 
     def test_poll_embed_shows_schedule_and_reason_behavior(self):
-        embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok")
+        embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok", "18:15")
         self.assertIn("play any game tonight", embed.description)
         self.assertIn("required reason", embed.fields[0].value)
-        self.assertIn("17:00 (Asia/Bangkok)", embed.footer.text)
+        self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
 
     def test_report_embed_contains_counts_names_and_no_reasons(self):
         report = {
@@ -82,7 +82,7 @@ class GamePollUiTests(unittest.TestCase):
             ],
         }
 
-        embed = report_embed(date(2026, 9, 1), "Asia/Bangkok", report)
+        embed = report_embed(date(2026, 9, 1), "Asia/Bangkok", report, "18:15")
         fields = {field.name: field.value for field in embed.fields}
 
         self.assertEqual("Rz — 20:00", fields["✅ Yes (1)"])
@@ -90,6 +90,7 @@ class GamePollUiTests(unittest.TestCase):
         self.assertEqual("Ahri", fields["❌ No (1)"])
         self.assertIn("Working late", fields["Reasons from No votes"])
         self.assertNotIn("🎧 Yes-voter voice attendance", fields)
+        self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
         self.assertIn("Saved to Airtable", embed.footer.text)
 
 

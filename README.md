@@ -14,7 +14,8 @@ exactly one human is in a channel and ends when another human joins or the solo
 person leaves. These records include the person, channel, start/end timestamps,
 and duration in seconds; bot accounts do not affect the solo count.
 
-It also runs a daily game poll:
+It also runs a daily game poll (times and channels can be changed from
+`/teemo_admin`):
 
 - **11:59 Asia/Bangkok:** asks whether anyone wants to play a game tonight.
 - **Yes** opens a private start-time picker (18:00–23:30 in 30-minute slots,
@@ -42,6 +43,12 @@ It also runs a daily game poll:
   - `/clips` — list who has clips
   - `/gamepoll_test` — post today's poll immediately
   - `/gamepoll_test_report` — close today's poll and post its report immediately
+  - `/teemo_admin` — open a private admin panel to change the poll/report
+    schedule, post today's poll or report immediately, and compose a news post
+    or announcement
+
+News and announcement posts use an embed in the configured post channel.
+Discord mentions are disabled, so text such as `@everyone` will not ping people.
 
 For `/setclip`, provide exactly one source: `audio` or `url`. URL sources must be
 public HTTP(S) links that point directly to a supported audio file, not a YouTube,
@@ -84,6 +91,11 @@ Create a base named **Teemo Game Polls** with these tables and fields:
   `Guild ID`, `User ID`, `Display Name`, `Voice Channel ID`, `Voice Channel
   Name`, `Started Alone At`, `Ended Alone At`, `Duration Seconds` (number),
   `Session Date`, and `Status`.
+- `Bot Settings`: `Setting Key` (primary text), `Poll Time`, `Report Time`,
+  `Poll Channel IDs`, `Announcement Channel ID`, `Updated At`, and `Updated By`.
+
+The `Bot Settings` record with key `global` is created or updated by the admin
+panel. Changes apply immediately and are restored from Airtable after a restart.
 
 Create a personal access token restricted to this base with only
 `data.records:read` and `data.records:write`. Keep it server-side and never
