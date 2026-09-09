@@ -185,6 +185,8 @@ class AirtablePollStore:
             "announcement_channel_id": announcement_channel_id,
             "updated_at": fields.get("Updated At"),
             "updated_by": fields.get("Updated By"),
+            "poll_enabled": fields.get("Poll Enabled", "yes") != "no",
+            "report_enabled": fields.get("Report Enabled", "yes") != "no",
         }
 
     async def save_bot_settings(
@@ -195,6 +197,8 @@ class AirtablePollStore:
         poll_channel_ids: list[int],
         announcement_channel_id: int | None,
         updated_by: str,
+        poll_enabled: bool | None = None,
+        report_enabled: bool | None = None,
     ) -> None:
         """Upsert the global settings changed through Teemo's admin panel."""
         fields = {
@@ -209,6 +213,10 @@ class AirtablePollStore:
             "Updated By": updated_by[:100],
         }
         async with self._settings_lock:
+            if poll_enabled is not None:
+                fields["Poll Enabled"] = "yes" if poll_enabled else "no"
+            if report_enabled is not None:
+                fields["Report Enabled"] = "yes" if report_enabled else "no"
             existing = await self._find_one(
                 BOT_SETTINGS_TABLE, "Setting Key", "global"
             )
@@ -216,6 +224,19 @@ class AirtablePollStore:
                 await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
             else:
                 await self._create(BOT_SETTINGS_TABLE, fields)
+
+    async def list_records(self, table: str, formula: str | None = None) -> list:
+        """Read every page; callers explicitly scope records to their server."""
+        params = {"pageSize": 100}
+        if formula:
+            params["filterByFormula"] = formula
+        records = []
+        while True:
+            result = await self._request("GET", table, params=dict(params))
+            records.extend(result.get("records", []))
+            if not result.get("offset"):
+                return records
+            params["offset"] = result["offset"]
 
     @staticmethod
     def _voice_active_key(guild_id: int, user_id: int) -> str:

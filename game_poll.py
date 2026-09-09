@@ -226,6 +226,7 @@ class GamePollService:
         self.timezone_name = timezone_name
         self.report_time = report_time
         self._poll_lifecycle_lock = asyncio.Lock()
+        self._delivery_lock = asyncio.Lock()
 
     async def _get_channel(self, channel_id: int) -> discord.abc.Messageable:
         channel = self.bot.get_channel(channel_id)
@@ -261,6 +262,10 @@ class GamePollService:
         return restored
 
     async def post_poll(self, channel_id: int, poll_date: date) -> bool:
+        async with self._delivery_lock:
+            return await self._post_poll(channel_id, poll_date)
+
+    async def _post_poll(self, channel_id: int, poll_date: date) -> bool:
         channel = await self._get_channel(channel_id)
         guild_id = channel.guild.id
         poll = await self.store.create_poll(guild_id, channel_id, poll_date)
@@ -465,6 +470,10 @@ class GamePollService:
         return generated
 
     async def generate_report(self, channel_id: int, poll_date: date) -> bool:
+        async with self._delivery_lock:
+            return await self._generate_report(channel_id, poll_date)
+
+    async def _generate_report(self, channel_id: int, poll_date: date) -> bool:
         channel = await self._get_channel(channel_id)
         poll = await self.store.get_poll(channel_id, poll_date)
         if not poll or not poll.get("message_id"):

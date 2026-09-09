@@ -43,9 +43,8 @@ It also runs a daily game poll (times and channels can be changed from
   - `/clips` — list who has clips
   - `/gamepoll_test` — post today's poll immediately
   - `/gamepoll_test_report` — close today's poll and post its report immediately
-  - `/teemo_admin` — open a private admin panel to change the poll/report
-    schedule, post today's poll or report immediately, and compose a news post
-    or announcement
+  - `/teemo_web` or `/teemo_admin` — get a private, one-use sign-in link to the
+    web console (server administrators only)
 
 News and announcement posts use an embed in the configured post channel.
 Discord mentions are disabled, so text such as `@everyone` will not ping people.
@@ -92,10 +91,61 @@ Create a base named **Teemo Game Polls** with these tables and fields:
   Name`, `Started Alone At`, `Ended Alone At`, `Duration Seconds` (number),
   `Session Date`, and `Status`.
 - `Bot Settings`: `Setting Key` (primary text), `Poll Time`, `Report Time`,
-  `Poll Channel IDs`, `Announcement Channel ID`, `Updated At`, and `Updated By`.
+  `Poll Channel IDs`, `Announcement Channel ID`, `Updated At`, `Updated By`,
+  `Poll Enabled`, and `Report Enabled` (text: `yes` / `no`; missing means enabled).
+- `Admin Events` and `Event Votes`: each has `Key` (primary text), `Guild ID`,
+  `Title`, `Status`, `Updated At` (text), and `Data` (long text containing JSON).
 
 The `Bot Settings` record with key `global` is created or updated by the admin
 panel. Changes apply immediately and are restored from Airtable after a restart.
+
+## Web console
+
+Run `/teemo_web` in your Discord server and open the private link within five
+minutes. It works once; your browser session lasts eight hours or until the bot
+restarts. Do not share sign-in links. Administrator permission is checked on
+every request. `/teemo_admin` now opens the same web console.
+
+- **Overview:** live voice rooms, 30-day poll responses, voice and solo hours,
+  member activity, scheduled posts, and event-service warnings.
+- **Polls & posts:** daily response details and one-time event results. Create,
+  edit, duplicate, cancel drafts, close voting early, or check uncertain delivery.
+- **Create something:** one-time polls with 2–10 custom choices, an optional
+  required No reason, a voting deadline, and an optional event start time.
+  Compose news or announcements using your own text (no AI news generation).
+  Save a draft, then explicitly publish now or approve its scheduled time.
+- **Voice activity:** individual sessions, solo periods, member totals and CSV
+  exports. Solo time is included in total voice time, not added twice.
+- **Daily schedule:** change daily times/channels, pause either task, and run
+  today's poll or summary immediately. Saving past times does not send a post.
+
+The UI uses Bangkok time. Attendance remains private; Discord's daily summary
+contains votes, play times and reasons only. Voice tracking measures presence,
+not speaking. Bot downtime can make session end times approximate. The dashboard
+shows 30 days and up to 250 recent sessions; CSV includes all sessions in that
+period. Historical Airtable records are retained. History refreshes every minute
+while viewing; forms are not refreshed underneath your edits.
+
+Use **one running replica**. Event schedules and votes survive restarts in
+Airtable. A poll whose entire publishing window passed during downtime is
+cancelled. Uncertain delivery is marked for review instead of automatically
+resending; use **Check delivery** to inspect the latest 100 destination messages.
+If an Airtable write failed after Discord delivery, inspect Discord before
+creating a replacement. Editing Airtable JSON directly is not a supported admin
+workflow; make changes in the console.
+
+The web server runs in the bot process on `PORT` (default 8080). In Railway,
+open the service's **Settings → Networking → Generate Domain**, targeting port
+8080. Teemo uses `RAILWAY_PUBLIC_DOMAIN` automatically. For another host, set
+`ADMIN_PUBLIC_URL=https://your-domain` and proxy HTTPS to the web port. Keep
+Discord and Airtable credentials server-side. The public page reveals no server
+data; APIs require an administrator session, with same-origin/CSRF checks for
+writes and HttpOnly cookies (Secure over HTTPS).
+
+For local development, use `ADMIN_PUBLIC_URL=http://127.0.0.1:8080`. To preview
+with simulated data only, run `python tests/preview_web.py` and open its printed
+one-use link. The preview cannot access Discord or Airtable. Run offline tests
+with `python -m unittest discover -s tests`.
 
 Create a personal access token restricted to this base with only
 `data.records:read` and `data.records:write`. Keep it server-side and never
@@ -157,6 +207,8 @@ setup work — ask me if you want that path instead).
 |---|---|
 | `bot.py` | Discord bot, name announcer, and Bangkok scheduler |
 | `game_poll.py` | Persistent Discord poll UI and summaries |
+| `admin_web.py` / `web/` | Protected web API and responsive admin console |
+| `event_manager.py` | Persistent one-time polls, posts, voting, and scheduling |
 | `airtable_store.py` | Airtable persistence for polls, responses, and reports |
 | `requirements.in` | Direct pinned dependencies |
 | `requirements.txt` | Fully locked Python dependency graph |

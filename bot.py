@@ -24,11 +24,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 import discord
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from admin_web import AdminWeb
 from airtable_store import AirtablePollStore
+from event_manager import EventManager
 from game_poll import GamePollService, GamePollView
 
 load_dotenv()
@@ -109,6 +112,9 @@ poll_runtime_started = False
 active_poll_clock = POLL_CLOCK
 active_report_clock = REPORT_CLOCK
 announcement_channel_id: int | None = None
+poll_enabled = True
+report_enabled = True
+web_admin: AdminWeb | None = None
 
 
 def _poll_channel_ids() -> list[int]:
@@ -200,6 +206,7 @@ def _apply_runtime_settings(
 
 
 async def _load_runtime_settings() -> None:
+    global poll_enabled, report_enabled
     if not game_poll_service:
         return
     settings = await game_poll_service.store.get_bot_settings()
@@ -219,6 +226,57 @@ async def _load_runtime_settings() -> None:
         channel_ids,
         settings.get("announcement_channel_id"),
     )
+    poll_enabled = settings.get("poll_enabled", True)
+    report_enabled = settings.get("report_enabled", True)
+
+
+def _web_settings():
+    return {"poll_time": f"{active_poll_clock:%H:%M}",
+            "report_time": f"{active_report_clock:%H:%M}",
+            "poll_channel_ids": [str(x) for x in game_poll_service.channel_ids],
+            "announcement_channel_id": str(announcement_channel_id or game_poll_service.channel_ids[0]),
+            "poll_enabled": poll_enabled, "report_enabled": report_enabled,
+            "timezone": TIMEZONE_NAME}
+
+
+async def _web_save_settings(data, member):
+    global poll_enabled, report_enabled
+    poll_clock = _clock_from_text(data.get("poll_time", ""))
+    report_clock = _clock_from_text(data.get("report_time", ""))
+    if report_clock <= poll_clock:
+        raise ValueError("Summary time must be later than poll time.")
+    ids = data.get("poll_channel_ids", [])
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 10:
+        raise ValueError("Choose 1–10 daily poll channels.")
+    ids = list(dict.fromkeys(int(x) for x in ids))
+    post_id = int(data.get("announcement_channel_id", "0"))
+    for flag in ("poll_enabled", "report_enabled"):
+        if not isinstance(data.get(flag), bool):
+            raise TypeError("Task switches must be on or off.")
+    for channel_id in set(ids + [post_id] + game_poll_service.channel_ids):
+        await web_admin.events.channel({"channel_id": str(channel_id), "guild_id": str(member.guild.id)})
+    today = datetime.now(BOT_TIMEZONE).date()
+    for removed in set(game_poll_service.channel_ids) - set(ids):
+        poll = await game_poll_service.store.get_poll(removed, today)
+        if poll and poll["status"] == "open":
+            raise ValueError("Close today's poll with Run summary before removing its channel.")
+    await game_poll_service.store.save_bot_settings(
+        poll_time=f"{poll_clock:%H:%M}", report_time=f"{report_clock:%H:%M}",
+        poll_channel_ids=ids, announcement_channel_id=post_id,
+        updated_by=f"{member} ({member.id})", poll_enabled=data["poll_enabled"], report_enabled=data["report_enabled"],
+    )
+    _apply_runtime_settings(poll_clock, report_clock, ids, post_id)
+    poll_enabled, report_enabled = data["poll_enabled"], data["report_enabled"]
+    # Explicit Run now controls handle past times; saving does not unexpectedly post.
+
+
+async def _web_daily_action(action, member):
+    completed = 0
+    for channel_id in game_poll_service.channel_ids:
+        channel = await _get_guild_message_channel(channel_id, member.guild.id)
+        method = game_poll_service.post_poll if action == "poll" else game_poll_service.generate_report
+        completed += int(await method(channel.id, datetime.now(BOT_TIMEZONE).date()))
+    return f"Completed in {completed} channel(s). Existing polls/reports are not posted twice."
 
 
 def clip_path(user_id: int) -> str | None:
@@ -323,14 +381,14 @@ def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
 
 @tasks.loop(time=POLL_RUN_TIME)
 async def daily_game_poll():
-    if game_poll_service:
+    if game_poll_service and poll_enabled:
         today = datetime.now(BOT_TIMEZONE).date()
         await game_poll_service.post_daily_polls(today)
 
 
 @tasks.loop(time=REPORT_RUN_TIME)
 async def daily_game_poll_report():
-    if game_poll_service:
+    if game_poll_service and report_enabled:
         today = datetime.now(BOT_TIMEZONE).date()
         await game_poll_service.generate_daily_reports(today)
 
@@ -341,9 +399,9 @@ async def _catch_up_game_poll_schedule() -> None:
         return
     now = datetime.now(BOT_TIMEZONE)
     local_clock = now.time().replace(tzinfo=None)
-    if active_poll_clock <= local_clock < active_report_clock:
+    if poll_enabled and active_poll_clock <= local_clock < active_report_clock:
         await game_poll_service.post_daily_polls(now.date())
-    elif local_clock >= active_report_clock:
+    elif report_enabled and local_clock >= active_report_clock:
         await game_poll_service.generate_daily_reports(now.date())
 
 
@@ -799,13 +857,28 @@ async def teemo_admin(interaction: discord.Interaction):
             "Open this panel from a server text channel.", ephemeral=True
         )
         return
+    await _send_web_link(interaction)
+
+
+async def _send_web_link(interaction):
+    if not web_admin or not web_admin.public_url:
+        await interaction.response.send_message("The web console address is being configured. Please try again shortly.", ephemeral=True)
+        return
+    link = web_admin.issue_link(interaction.user.id, interaction.guild_id)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Open Teemo console", url=link))
     await interaction.response.send_message(
-        embed=_admin_panel_embed(interaction.channel_id),
-        view=AdminPanelView(
-            interaction.user.id, interaction.guild_id, interaction.channel_id
-        ),
-        ephemeral=True,
+        "Your private web console link expires in 5 minutes and can be used once. "
+        "The browser session lasts 8 hours. Keep this link private.", view=view, ephemeral=True,
     )
+
+
+@bot.tree.command(name="teemo_web", description="Open the Teemo web dashboard and admin console")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_permissions(administrator=True)
+async def teemo_web(interaction: discord.Interaction):
+    await _send_web_link(interaction)
 
 
 @bot.tree.command(
@@ -970,6 +1043,7 @@ async def clips(interaction: discord.Interaction):
 @gamepoll_test.error
 @gamepoll_test_report.error
 @teemo_admin.error
+@teemo_web.error
 async def admin_only_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.errors.MissingPermissions):
         await interaction.response.send_message("❌ Admins only.", ephemeral=True)
@@ -977,10 +1051,33 @@ async def admin_only_error(interaction: discord.Interaction, error):
         raise error
 
 
+async def main():
+    global web_admin
+    async with bot:
+        configure_game_poll()
+        if not game_poll_service:
+            LOGGER.warning("Web console requires Airtable and poll channel configuration; starting voice bot only")
+            await bot.start(TOKEN)
+            return
+        public_url = os.getenv("ADMIN_PUBLIC_URL", "").rstrip("/")
+        if not public_url and os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+            public_url = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
+        events = EventManager(bot, game_poll_service.store)
+        web_admin = AdminWeb(bot, game_poll_service.store, events, _web_settings,
+                             _web_save_settings, _web_daily_action, public_url)
+        runner = web.AppRunner(web_admin.app, access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, os.getenv("WEB_HOST", "0.0.0.0"), int(os.getenv("PORT", "8080"))).start()
+        LOGGER.info("Teemo web console is listening; public URL configured: %s", bool(public_url))
+        try:
+            await bot.start(TOKEN)
+        finally:
+            await runner.cleanup()
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    configure_game_poll()
-    bot.run(TOKEN)
+    asyncio.run(main())

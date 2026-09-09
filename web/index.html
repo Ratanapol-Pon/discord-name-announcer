@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#234b3c"><meta name="referrer" content="no-referrer">
+  <title>Teemo — Community console</title>
+  <link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script>
+</head>
+<body>
+<div id="login" class="login-screen">
+  <div class="login-art" aria-hidden="true"><div class="orb"></div><svg viewBox="0 0 400 350"><path d="M166 169q-10 83-39 117q65 36 132-3q-33-64-26-115" fill="#eee5cb"/><path d="M48 170C56 8 321-10 355 168q-140 72-307 2" fill="#b5ca8c"/><path d="M48 170q138 21 307-2q-144 89-307 2" fill="#759169"/><ellipse cx="138" cy="99" rx="30" ry="19" fill="#e8edd9" transform="rotate(-23 138 99)"/><ellipse cx="250" cy="76" rx="23" ry="18" fill="#e8edd9"/><ellipse cx="304" cy="129" rx="16" ry="13" fill="#e8edd9"/><path d="M54 303q113-37 290-7" fill="none" stroke="#597760" stroke-width="2"/></svg><span>A little coordination.<br>A lot more good nights.</span></div>
+  <main class="login-copy"><div class="brand"><span class="brand-mark">t.</span> TEEMO <small>COMMUNITY CONSOLE</small></div>
+    <p class="eyebrow">YOUR SERVER, TOGETHER</p><h1>Make room<br>for a good night.</h1><p>Plan the next game. Bring everyone together.<br>Keep a pulse on your community.</p>
+    <div id="login-state" class="login-instructions"><strong>Sign in through Discord</strong><p>Run <code>/teemo_web</code> in your server, then open your private sign-in link.</p><span class="muted">Server administrators only · No extra password</span></div>
+  </main>
+</div>
+<div id="shell" class="shell" hidden>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Teemo home"><span class="brand-mark">t.</span><span>TEEMO<small>COMMUNITY CONSOLE</small></span></a>
+    <div class="server-box"><span class="server-avatar">T</span><div><strong id="guild-name">Your server</strong><span class="muted">Administrator workspace</span></div></div>
+    <p class="nav-label">WORKSPACE</p>
+    <nav aria-label="Main navigation">
+      <button data-page="overview" class="nav-item active"><span>◫</span> Overview</button>
+      <button data-page="events" class="nav-item"><span>▤</span> Polls & posts</button>
+      <button data-page="create" class="nav-item"><span>＋</span> Create something</button>
+      <button data-page="voice" class="nav-item"><span>◉</span> Voice activity</button>
+      <button data-page="schedule" class="nav-item"><span>◷</span> Daily schedule</button>
+    </nav>
+    <div class="sidebar-note"><span class="small-leaf">❋</span><strong>More time playing.</strong><p>Let Teemo take care<br>of getting everyone together.</p></div>
+    <div class="profile"><span class="profile-avatar" id="user-initial">R</span><div><strong id="user-name">Admin</strong><span class="muted">Server administrator</span></div><button id="logout" class="icon-button" title="Sign out" aria-label="Sign out">↗</button></div>
+  </aside>
+  <div class="workspace"><header class="topbar"><span id="breadcrumb">Workspace / Overview</span><div><span class="status-dot"></span><span id="connection">Teemo connected</span><span class="timezone">Bangkok · GMT+7</span></div></header>
+    <main id="content" tabindex="-1" aria-live="polite"></main>
+    <footer>TEEMO <span>A little help for your community.</span><span id="updated">Connecting…</span></footer>
+  </div>
+</div>
+<div id="toast" role="status" hidden></div>
+<dialog id="detail-dialog"><div class="dialog-top"><span class="eyebrow">POLL & POST DETAILS</span><button id="close-dialog" class="icon-button" aria-label="Close details">×</button></div><div id="detail-content"></div></dialog>
+</body></html>
