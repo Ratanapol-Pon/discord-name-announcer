@@ -1,5 +1,15 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
+function applyTheme(theme){
+  document.documentElement.dataset.theme=theme;
+  try{localStorage.setItem('teemo-theme',theme);}catch(e){}
+  document.querySelectorAll('.theme-toggle').forEach(b=>{
+    b.textContent=theme==='dark'?'☀':'☾';
+    b.setAttribute('aria-label',theme==='dark'?'Switch to the light theme':'Switch to the dark theme');
+  });
+}
+document.querySelectorAll('.theme-toggle').forEach(b=>b.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark')));
+applyTheme(document.documentElement.dataset.theme||'light');
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let session, dashboard, page = 'overview', csrf = '', editKey = null, busy = false, toastTimer;
 const labels = {overview:'Overview',events:'Polls & posts',create:'Create',voice:'Voice activity',schedule:'Daily schedule'};

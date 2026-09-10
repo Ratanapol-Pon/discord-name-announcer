@@ -130,7 +130,7 @@ class AdminWeb:
                 "X-Content-Type-Options": "nosniff",
                 "Referrer-Policy": "no-referrer",
                 "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                "Content-Security-Policy": "default-src 'self'; script-src 'self' 'sha256-kTJ0229GSUr+vVdMT7YLjWHsu+e5sH4etDADXuRAnAA='; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             }
         )
         return response

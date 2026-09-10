@@ -4,9 +4,11 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#234b3c"><meta name="referrer" content="no-referrer">
   <title>Teemo — Community console</title>
+  <script>document.documentElement.dataset.theme=localStorage.getItem('teemo-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');</script>
   <link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script>
 </head>
 <body>
+<button class="theme-toggle login-toggle" aria-label="Switch between light and dark theme">☾</button>
 <div id="login" class="login-screen">
   <div class="login-art" aria-hidden="true"><div class="orb"></div><svg viewBox="0 0 400 350"><path d="M166 169q-10 83-39 117q65 36 132-3q-33-64-26-115" fill="#eee5cb"/><path d="M48 170C56 8 321-10 355 168q-140 72-307 2" fill="#b5ca8c"/><path d="M48 170q138 21 307-2q-144 89-307 2" fill="#759169"/><ellipse cx="138" cy="99" rx="30" ry="19" fill="#e8edd9" transform="rotate(-23 138 99)"/><ellipse cx="250" cy="76" rx="23" ry="18" fill="#e8edd9"/><ellipse cx="304" cy="129" rx="16" ry="13" fill="#e8edd9"/><path d="M54 303q113-37 290-7" fill="none" stroke="#597760" stroke-width="2"/></svg><span>A little coordination.<br>A lot more good nights.</span></div>
   <main class="login-copy"><div class="brand"><span class="brand-mark">t.</span> TEEMO <small>COMMUNITY CONSOLE</small></div>
@@ -29,7 +31,7 @@
     <div class="sidebar-note"><span class="small-leaf">❋</span><strong>More time playing.</strong><p>Let Teemo take care<br>of getting everyone together.</p></div>
     <div class="profile"><span class="profile-avatar" id="user-initial">R</span><div><strong id="user-name">Admin</strong><span class="muted">Server administrator</span></div><button id="logout" class="icon-button" title="Sign out" aria-label="Sign out">↗</button></div>
   </aside>
-  <div class="workspace"><header class="topbar"><span id="breadcrumb">Workspace / Overview</span><div><span class="status-dot"></span><span id="connection">Teemo connected</span><span class="timezone">Bangkok · GMT+7</span></div></header>
+    <div class="workspace"><header class="topbar"><span id="breadcrumb">Workspace / Overview</span><div><span class="status-dot"></span><span id="connection">Teemo connected</span><span class="timezone">Bangkok · GMT+7</span><button class="theme-toggle" aria-label="Switch between light and dark theme">☾</button></div></header>
     <main id="content" tabindex="-1" aria-live="polite"></main>
     <footer>TEEMO <span>A little help for your community.</span><span id="updated">Connecting…</span></footer>
   </div>
