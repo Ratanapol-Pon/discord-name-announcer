@@ -4,3 +4,36 @@
 @media(max-width:1100px){.sidebar{width:205px;padding-left:12px;padding-right:12px}.workspace{margin-left:205px;width:calc(100% - 205px)}main#content{padding:28px 24px}.topbar{padding:0 24px}.stat{padding:18px}.stat-value{font-size:30px}.grid-two{grid-template-columns:1fr}.composer-grid{grid-template-columns:1.2fr 1fr;gap:15px}.composer-grid .panel{padding:20px}.welcome-card{padding:25px}.banner-sprout{display:none}h1{font-size:38px}footer{margin:0 24px}.timezone{margin-left:8px;padding-left:8px}}
 @media(max-width:760px){.sidebar{position:static;width:100%;padding:16px;border-right:0;border-bottom:1px solid var(--line)}.shell{display:block}.sidebar>.brand{margin:0 0 18px}.server-box,.nav-label,.sidebar-note,.profile{display:none}.sidebar nav{display:flex;overflow:auto;gap:5px}.nav-item{width:auto;white-space:nowrap;font-size:11px;padding:9px 11px}.nav-item span{display:none}.workspace{margin:0;width:100%}.topbar{height:52px;padding:0 18px;font-size:10px}.timezone{display:none}main#content{padding:23px 18px}.stats{grid-template-columns:1fr 1fr;gap:12px}.stat{padding:17px}.stat-value{font-size:30px;margin:12px 0 8px}.page-heading h1{font-size:34px}.page-heading{align-items:flex-start}.page-heading .button{padding:10px;font-size:10px}.page-heading p{font-size:11px}.welcome-card{display:block;padding:25px}.welcome-card h2{font-size:25px}.welcome-card .button{margin-top:20px}.grid-two,.composer-grid{grid-template-columns:1fr;gap:17px}.panel{padding:19px}.preview-wrap{position:static}.form-row{grid-template-columns:1fr;gap:0}.filterbar{flex-wrap:wrap}.filterbar input{max-width:none}.login-screen{grid-template-columns:1fr}.login-art{display:none}.login-copy{padding:45px 28px}.login-copy>.brand{margin-bottom:65px}.login-copy h1{font-size:50px}footer{margin:0 18px;font-size:8px;flex-wrap:wrap}.filterbar select{max-width:100%}#toast{bottom:16px;right:16px;left:16px;max-width:none}.detail-result .chart-row{grid-template-columns:100px 1fr 32px}}
 .grid-two-panel{margin-top:23px}
+
+/* --- Friendlier polish: softer surfaces, gentle motion, easier tapping --- */
+html{scroll-behavior:smooth}
+::selection{background:#d8e7bd;color:var(--ink)}
+.button,.nav-item,.text-button,.icon-button{transition:background-color .18s ease,color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.button:not(:disabled):hover{transform:translateY(-1px);box-shadow:0 6px 18px #234b3c22}
+.button:not(:disabled):active{transform:translateY(0);box-shadow:none}
+.button:focus-visible,.nav-item:focus-visible,.text-button:focus-visible,.icon-button:focus-visible{outline:2px solid #8fae72;outline-offset:2px}
+.panel,.stat{transition:box-shadow .22s ease,transform .22s ease}
+.panel:hover,.stat:hover{box-shadow:0 10px 30px #234b3c14}
+.tag{border-radius:999px;padding:5px 11px;font-weight:600;letter-spacing:.2px}
+tbody tr{transition:background-color .15s ease}
+tbody tr:hover{background:#f6f8f0}
+.nav-item{border-radius:9px}
+.nav-item.active{box-shadow:inset 3px 0 0 var(--forest)}
+input,select,textarea{transition:border-color .15s ease,box-shadow .15s ease}
+input:focus,select:focus,textarea:focus{border-color:#8fae72;box-shadow:0 0 0 3px #b7cc9a55}
+.check input{width:18px;height:18px}
+.empty{border:1px dashed #d5dccb;border-radius:10px;margin:6px 0;background:#fbfbf7}
+@keyframes teemo-pulse{0%,100%{box-shadow:0 0 0 0 #739b5945}50%{box-shadow:0 0 0 5px #739b5900}}
+.status-dot{animation:teemo-pulse 2.6s ease-in-out infinite}
+dialog{box-shadow:0 24px 90px #172d3159}
+@media(max-width:760px){
+  .topbar{position:sticky;top:0;z-index:6}
+  .nav-item{min-height:44px}
+  .button{min-height:44px;padding:12px 18px}
+  .page-heading{flex-direction:column;align-items:stretch;gap:12px}
+  .page-heading .button{width:100%}
+  .filterbar input,.filterbar select{min-height:44px}
+  dialog{width:100vw;max-width:100vw;height:100%;max-height:100vh;border-radius:0;border:0}
+  .detail-actions .button{flex:1 1 140px}
+}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
