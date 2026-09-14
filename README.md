@@ -101,6 +101,40 @@ panel. Changes apply immediately and are restored from Airtable after a restart.
 
 ## Web console
 
+### Yearly December 25 announcement
+
+Every December 25 at **17:00 Asia/Bangkok**, Teemo posts a yearly game-poll
+summary in the configured announcement channel (or the first daily poll channel
+if none is configured). It covers **January 1–December 24 of the current year**:
+daily polls posted, distinct respondents, Yes/Maybe/No totals, and each person's
+total time in voice chat. The public post shows up to ten voice-time highlights,
+total member hours and session counts; an attached CSV includes every member
+with recorded voice time. It does not expose private No reasons, solo breakdowns,
+individual join/leave timestamps, or Yes-voter attendance comparisons. One-time
+event polls are excluded. Poll counts use the latest saved answer per person per
+poll. The **daily** summary still excludes attendance and voice statistics.
+
+Voice sessions are clipped to the reporting period in the bot's timezone. Total
+member hours include solo presence and count each member separately, not room
+wall-clock time. Tracking began when the bot was enabled, so earlier activity is
+not available; sessions spanning bot downtime can be approximate. The bot measures
+presence, not speaking, and members with no recorded voice time are not listed.
+
+The announcement and aggregate totals are saved in Airtable's existing
+`Admin Events` table and appear in the console's post history. Its persistent
+year/server key prevents routine restart, channel-change, or retry duplicates. Uncertain delivery
+requires **Check delivery** in the console instead of automatic resending.
+If Teemo is offline at the scheduled time, it catches up through December 31;
+it does not send historical years' summaries in January. The bot must be hosted
+and running for delivery. No new Airtable tables are needed.
+The announcement channel must grant Teemo **Attach Files** permission for the CSV.
+
+Set `YEARLY_SUMMARY_ENABLED=false` to disable this independent yearly task, or
+change `YEARLY_SUMMARY_TIME` (24-hour format). These environment changes require
+a restart; the web daily schedule controls do not change the yearly schedule.
+
+### Opening the console
+
 Run `/teemo_web` in your Discord server and open the private link within five
 minutes. It works once; your browser session lasts eight hours or until the bot
 restarts. Do not share sign-in links. Administrator permission is checked on

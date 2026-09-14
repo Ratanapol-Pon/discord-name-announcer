@@ -33,6 +33,7 @@ from admin_web import AdminWeb
 from airtable_store import AirtablePollStore
 from event_manager import EventManager
 from game_poll import GamePollService, GamePollView
+from yearly_summary import YearlySummary
 
 load_dotenv()
 LOGGER = logging.getLogger(__name__)
@@ -71,6 +72,8 @@ except ZoneInfoNotFoundError as exc:
 
 POLL_CLOCK = _parse_clock(os.getenv("POLL_TIME", "11:59"), "POLL_TIME")
 REPORT_CLOCK = _parse_clock(os.getenv("REPORT_TIME", "17:00"), "REPORT_TIME")
+YEARLY_SUMMARY_CLOCK = _parse_clock(os.getenv("YEARLY_SUMMARY_TIME", "17:00"), "YEARLY_SUMMARY_TIME")
+YEARLY_SUMMARY_ENABLED = os.getenv("YEARLY_SUMMARY_ENABLED", "true").lower() == "true"
 if REPORT_CLOCK <= POLL_CLOCK:
     raise SystemExit("REPORT_TIME must be later than POLL_TIME on the same day.")
 POLL_RUN_TIME = POLL_CLOCK.replace(tzinfo=BOT_TIMEZONE)
@@ -1065,6 +1068,13 @@ async def main():
         events = EventManager(bot, game_poll_service.store)
         web_admin = AdminWeb(bot, game_poll_service.store, events, _web_settings,
                              _web_save_settings, _web_daily_action, public_url)
+        web_admin.yearly_summary = YearlySummary(
+            events, BOT_TIMEZONE, YEARLY_SUMMARY_CLOCK,
+            lambda: (announcement_channel_id or game_poll_service.channel_ids[0]) if poll_runtime_started else None,
+            enabled=YEARLY_SUMMARY_ENABLED,
+        )
+        LOGGER.info("Yearly summary: enabled=%s, December 25 at %s (%s)",
+                    YEARLY_SUMMARY_ENABLED, YEARLY_SUMMARY_CLOCK.strftime("%H:%M"), TIMEZONE_NAME)
         runner = web.AppRunner(web_admin.app, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, os.getenv("WEB_HOST", "0.0.0.0"), int(os.getenv("PORT", "8080"))).start()

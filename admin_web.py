@@ -34,6 +34,8 @@ class AdminWeb:
         self.action_lock = asyncio.Lock()
         self.started = time.monotonic()
         self.worker = None
+        self.yearly_summary = None
+        self.yearly_checked_at = float("-inf")
         self.app = web.Application(middlewares=[self.boundary], client_max_size=24000)
         self.app.add_routes(
             [
@@ -323,7 +325,10 @@ class AdminWeb:
                 "health": {
                     "discord": self.bot.is_ready(),
                     "event_scheduler": self.events.ready,
-                    "error": self.events.last_error,
+                    "error": self.events.last_error
+                    or (
+                        self.yearly_summary.last_error if self.yearly_summary else None
+                    ),
                     "uptime_seconds": int(time.monotonic() - self.started),
                 },
             }
@@ -439,6 +444,19 @@ class AdminWeb:
                 except Exception:
                     LOGGER.exception("Web event worker failed")
                     self.events.last_error = "Event service could not reach storage. It will retry automatically."
+                if (
+                    self.yearly_summary
+                    and time.monotonic() - self.yearly_checked_at >= 60
+                ):
+                    self.yearly_checked_at = time.monotonic()
+                    try:
+                        await self.yearly_summary.run()
+                        self.yearly_summary.last_error = None
+                    except Exception:
+                        LOGGER.exception(
+                            "Yearly summary failed; will retry in one minute"
+                        )
+                        self.yearly_summary.last_error = "Yearly summary failed. Check storage and announcement channel permissions."
 
     async def start_worker(self, app):
         self.worker = asyncio.create_task(self.work())

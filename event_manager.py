@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import csv
+import io
 import json
 import logging
 import uuid
@@ -317,10 +319,36 @@ class EventManager:
         await self.save(event)
         try:
             displayed = dict(event, status="open")
+            attachments = {}
+            # Generated yearly recaps include everyone without exceeding embed limits.
+            members = event.get("annual_summary", {}).get("voice_members", [])
+            if members:
+                output = io.StringIO(newline="")
+                writer = csv.writer(output)
+                writer.writerow(
+                    ["Member", "Voice hours", "Voice seconds", "Voice sessions"]
+                )
+                for person in members:
+                    name = str(person["name"])
+                    if name.lstrip().startswith(("=", "+", "-", "@")):
+                        name = "'" + name
+                    writer.writerow(
+                        [
+                            name,
+                            f"{person['seconds'] / 3600:.2f}",
+                            person["seconds"],
+                            person["sessions"],
+                        ]
+                    )
+                attachments["file"] = discord.File(
+                    io.BytesIO(output.getvalue().encode("utf-8-sig")),
+                    filename=f"teemo-{event['annual_summary']['year']}-voice-summary.csv",
+                )
             msg = await channel.send(
                 embed=event_embed(displayed),
                 view=EventView(self, displayed) if event["kind"] == "poll" else None,
                 allowed_mentions=discord.AllowedMentions.none(),
+                **attachments,
             )
             event.update(
                 message_id=str(msg.id),
