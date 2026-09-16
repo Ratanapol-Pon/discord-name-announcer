@@ -85,13 +85,108 @@ class GamePollUiTests(unittest.TestCase):
         embed = report_embed(date(2026, 9, 1), "Asia/Bangkok", report, "18:15")
         fields = {field.name: field.value for field in embed.fields}
 
-        self.assertEqual("Rz — 20:00", fields["✅ Yes (1)"])
-        self.assertEqual("Teemo", fields["🤔 Maybe (1)"])
-        self.assertEqual("Ahri", fields["❌ No (1)"])
-        self.assertIn("Working late", fields["Reasons from No votes"])
-        self.assertNotIn("🎧 Yes-voter voice attendance", fields)
+        self.assertEqual("🎮 Tonight's lineup", embed.title)
+        self.assertIn("Tuesday, 01 September 2026", embed.description)
+        self.assertIn("1 playing · 1 maybe · 1 sitting out", embed.description)
+        self.assertIn("3 replies received", embed.description)
+        self.assertEqual("• **Rz** — 20:00", fields["✅ Ready to play · 1"])
+        self.assertEqual("• **Teemo**", fields["🤔 Might join · 1"])
+        self.assertEqual(
+            "• **Ahri** — Working late", fields["🌙 Sitting this one out · 1"]
+        )
+        self.assertEqual(3, len(fields))
+        self.assertNotIn("attendance", str(embed.to_dict()).lower())
+        self.assertNotIn("joined_voice_chat", str(embed.to_dict()))
+        self.assertTrue(all(not field.inline for field in embed.fields))
         self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
         self.assertIn("Saved to Airtable", embed.footer.text)
+
+    def test_report_empty_and_quiet_night_copy(self):
+        for counts, expected in (
+            ({}, "No replies this time"),
+            ({"maybe_count": 2}, "check in with each other"),
+            ({"no_count": 1}, "Catch you next time"),
+        ):
+            with self.subTest(counts=counts):
+                embed = report_embed(date(2026, 9, 16), "Asia/Bangkok", counts)
+                self.assertIn(expected, embed.description)
+                self.assertTrue(all(field.value for field in embed.fields))
+                if counts.get("no_count") == 1:
+                    self.assertIn("1 reply received", embed.description)
+
+    def test_report_shows_flexible_and_missing_times_without_guessing(self):
+        embed = report_embed(
+            date(2026, 9, 16),
+            "Asia/Bangkok",
+            {
+                "yes_count": 2,
+                "responses": [
+                    {"display_name": "Rz", "choice": "yes", "play_time": "Flexible"},
+                    {"display_name": "Ahri", "choice": "yes"},
+                ],
+            },
+        )
+        self.assertEqual(
+            "• **Rz** — Flexible\n• **Ahri** — Time not selected", embed.fields[0].value
+        )
+
+    def test_report_escapes_user_text_and_supports_legacy_reason_list(self):
+        embed = report_embed(
+            date(2026, 9, 16),
+            "Asia/Bangkok",
+            {
+                "no_count": 1,
+                "responses": [
+                    {
+                        "user_id": 3,
+                        "display_name": "**Ahri**\n@everyone",
+                        "choice": "no",
+                    }
+                ],
+                "no_reasons": [
+                    {
+                        "user_id": "3",
+                        "reason": "Working\nlate *again* <@123456789012345678>",
+                    }
+                ],
+            },
+        )
+        value = embed.fields[2].value
+        self.assertNotIn("\n", value)
+        self.assertNotIn("@everyone", value)
+        self.assertNotIn("<@123456789012345678>", value)
+        self.assertIn(r"\*\*Ahri\*\*", value)
+        self.assertIn(r"Working late \*again\*", value)
+
+    def test_large_report_preserves_complete_entries_with_omission_count(self):
+        report = {
+            "yes_count": 100,
+            "maybe_count": 100,
+            "no_count": 100,
+            "responses": [
+                {
+                    "user_id": i,
+                    "display_name": f"Member {i} " + "*" * 80,
+                    "choice": choice,
+                    "reason": "x" * 500,
+                    "play_time": "20:00",
+                }
+                for choice in ("yes", "maybe", "no")
+                for i in range(100)
+            ],
+        }
+        embed = report_embed(date(2026, 9, 16), "Asia/Bangkok", report)
+        self.assertLessEqual(len(embed), 6000)
+        for field in embed.fields:
+            self.assertLessEqual(len(field.value), 1024)
+            lines = field.value.splitlines()
+            self.assertGreater(len(lines), 1)
+            self.assertTrue(all(line.startswith("• **") for line in lines[:-1]))
+            omitted = 100 - (len(lines) - 1)
+            self.assertEqual(
+                f"*+{omitted} more — full list saved in the admin dashboard.*",
+                lines[-1],
+            )
 
 
 class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -205,9 +300,7 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
             members=[solo_member, bot_member],
         )
 
-        await self.service.track_solo_voice_channels(
-            (channel,), date(2026, 9, 3)
-        )
+        await self.service.track_solo_voice_channels((channel,), date(2026, 9, 3))
 
         self.store.sync_solo_voice_channel.assert_awaited_once_with(
             99,
@@ -230,9 +323,7 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        await self.service.track_solo_voice_channels(
-            (channel,), date(2026, 9, 3)
-        )
+        await self.service.track_solo_voice_channels((channel,), date(2026, 9, 3))
 
         self.store.sync_solo_voice_channel.assert_awaited_once_with(
             99,
@@ -282,6 +373,10 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
         edited_view = poll_message.edit.await_args.kwargs["view"]
         self.assertTrue(all(item.disabled for item in edited_view.children))
         self.store.set_report_message.assert_awaited_once_with(7, 801)
+        self.assertEqual(
+            discord.AllowedMentions.none().to_dict(),
+            self.channel.send.await_args.kwargs["allowed_mentions"].to_dict(),
+        )
 
 
 if __name__ == "__main__":

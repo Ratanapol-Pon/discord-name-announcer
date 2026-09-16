@@ -47,17 +47,34 @@ def poll_embed(
     return embed
 
 
-def _response_names(responses: Iterable[dict[str, Any]], choice: str) -> str:
-    names = []
-    for response in responses:
-        if response["choice"] != choice:
-            continue
-        name = discord.utils.escape_markdown(str(response["display_name"]))
-        if choice == "yes" and response.get("play_time"):
-            play_time = discord.utils.escape_markdown(str(response["play_time"]))
-            name = f"{name} — {play_time}"
-        names.append(name)
-    return ", ".join(names) if names else "—"
+def _summary_text(value: Any, limit: int) -> str:
+    """Keep member-provided text on one line without formatting or mentions."""
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return discord.utils.escape_markdown(discord.utils.escape_mentions(text))
+
+
+def _summary_lines(lines: list[str], empty: str) -> str:
+    """Fit complete entries in a Discord field, making omitted people explicit."""
+    if not lines:
+        return empty
+    shown: list[str] = []
+    for index, line in enumerate(lines):
+        remaining = len(lines) - index - 1
+        suffix = (
+            f"\n*+{remaining} more — full list saved in the admin dashboard.*"
+            if remaining
+            else ""
+        )
+        candidate = "\n".join([*shown, line])
+        if len(candidate + suffix) > 1024:
+            break
+        shown.append(line)
+    omitted = len(lines) - len(shown)
+    if omitted:
+        shown.append(f"*+{omitted} more — full list saved in the admin dashboard.*")
+    return "\n".join(shown)
 
 
 def report_embed(
@@ -67,40 +84,65 @@ def report_embed(
     report_time: str = "17:00",
 ) -> discord.Embed:
     responses = list(report.get("responses") or [])
+    counts = {
+        choice: int(report.get(f"{choice}_count", 0))
+        for choice in ("yes", "maybe", "no")
+    }
+    total = sum(counts.values())
+    if counts["yes"]:
+        intro = "Who's up for a game? Find your teammates below!"
+    elif counts["maybe"]:
+        intro = "Plans are still flexible — check in with each other before making plans."
+    elif total:
+        intro = "A quiet night for the squad. Catch you next time!"
+    else:
+        intro = "No replies this time — there's always another game night!"
     embed = discord.Embed(
-        title="Tonight's game poll — summary",
-        description=f"Results for {poll_date.isoformat()}",
-        color=discord.Color.green()
-        if report.get("yes_count", 0)
-        else discord.Color.gold(),
+        title="🎮 Tonight's lineup",
+        description=(
+            f"**{poll_date.strftime('%A, %d %B %Y')}**\n{intro}\n\n"
+            f"**{counts['yes']} playing · {counts['maybe']} maybe · {counts['no']} sitting out**\n"
+            f"{total} {'reply' if total == 1 else 'replies'} received"
+        ),
+        color=discord.Color.green() if counts["yes"] else discord.Color.gold(),
     )
-    for choice, label, emoji in (
-        ("yes", "Yes", "✅"),
-        ("maybe", "Maybe", "🤔"),
-        ("no", "No", "❌"),
+    reasons = {
+        str(item.get("user_id")): item.get("reason")
+        for item in report.get("no_reasons") or []
+    }
+    for choice, label, empty in (
+        ("yes", "✅ Ready to play", "No one confirmed yet."),
+        ("maybe", "🤔 Might join", "No maybes today."),
+        ("no", "🌙 Sitting this one out", "No one is sitting out."),
     ):
-        names = _response_names(responses, choice)
-        if len(names) > 1000:
-            names = names[:997] + "..."
+        lines = []
+        for response in responses:
+            if response.get("choice") != choice:
+                continue
+            name = _summary_text(response.get("display_name"), 80) or "Unknown member"
+            line = f"• **{name}**"
+            if choice == "yes":
+                play_time = response.get("play_time")
+                time_label = (
+                    "Flexible"
+                    if play_time == "Flexible"
+                    else _summary_text(play_time, 40) or "Time not selected"
+                )
+                line += f" — {time_label}"
+            elif choice == "no":
+                reason = response.get("reason") or reasons.get(
+                    str(response.get("user_id"))
+                )
+                if reason:
+                    line += f" — {_summary_text(reason, 160)}"
+            lines.append(line)
         embed.add_field(
-            name=f"{emoji} {label} ({int(report.get(f'{choice}_count', 0))})",
-            value=names,
+            name=f"{label} · {counts[choice]}",
+            value=_summary_lines(lines, empty),
             inline=False,
         )
-
-    reasons = [
-        "• **{}:** {}".format(
-            discord.utils.escape_markdown(str(item["display_name"])),
-            discord.utils.escape_markdown(str(item["reason"])),
-        )
-        for item in report.get("no_reasons") or []
-    ]
-    reason_text = "\n".join(reasons) if reasons else "No ‘No’ reasons submitted."
-    if len(reason_text) > 1000:
-        reason_text = reason_text[:997] + "..."
-    embed.add_field(name="Reasons from No votes", value=reason_text, inline=False)
     embed.set_footer(
-        text=f"Closed at {report_time} ({timezone_name}) • Saved to Airtable"
+        text=f"Poll closed at {report_time} ({timezone_name}) • All play times use this timezone • Saved to Airtable"
     )
     return embed
 
@@ -133,7 +175,9 @@ class YesTimeSelect(discord.ui.Select):
             discord.SelectOption(
                 label=play_time,
                 value=play_time,
-                description="I can start at any time" if play_time == "Flexible" else None,
+                description="I can start at any time"
+                if play_time == "Flexible"
+                else None,
             )
             for play_time in PLAY_TIME_OPTIONS
         ]
@@ -499,9 +543,7 @@ class GamePollService:
             )
 
         summary_message = await channel.send(
-            embed=report_embed(
-                poll_date, self.timezone_name, report, self.report_time
-            ),
+            embed=report_embed(poll_date, self.timezone_name, report, self.report_time),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         await self.store.set_report_message(poll["id"], summary_message.id)

@@ -27,6 +27,12 @@ It also runs a daily game poll (times and channels can be changed from
 - **17:00 Asia/Bangkok:** closes the poll and posts a summary of votes and No
   reasons. Voice attendance stays private in Airtable and is not shown in the
   Discord summary.
+- Daily summaries use a friendly **Tonight's lineup** card: a readable date,
+  at-a-glance vote totals, and one member per line under Ready to play, Might
+  join, and Sitting this one out. Yes votes include preferred times; No reasons
+  appear beside the member's name. Long lists show an explicit remaining count
+  with full answers available in the admin dashboard. Empty polls get a gentle
+  no-replies message. This does not change the schedule, stored data, or yearly recap.
 - A restart between 11:59 and 17:00 catches up a missing poll; a restart after
   17:00 retries a missing report for an existing poll.
 
