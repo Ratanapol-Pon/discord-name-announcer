@@ -14,9 +14,13 @@ const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&a
 let session, dashboard, page = 'overview', csrf = '', editKey = null, busy = false, toastTimer;
 const labels = {overview:'Overview',events:'Polls & posts',create:'Create',voice:'Voice activity',schedule:'Daily schedule'};
 const statusLabels = {draft:'Draft',scheduled:'Scheduled',open:'Voting open',published:'Published',closed:'Voting closed',review:'Needs a check',cancelled:'Cancelled',enabled:'On',paused:'Paused',active:'Live now',solo:'Flying solo'};
-const fmtDate = (x) => x ? new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(x)) : '—';
-const hours = (n) => ((Number(n)||0)/3600).toFixed(1);
-const duration = (n) => n >= 3600 ? `${hours(n)} h` : `${Math.floor((n||0)/60)} min`;
+const fmtDate = (x) => x ? new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(x)) : '—';
+const clockTime = (value) => /^\d{2}:\d{2}$/.test(String(value)) ? `${value}:00` : String(value||'—');
+function duration(value) {
+  const number=Number(value);
+  const seconds=Number.isFinite(number)?Math.max(0,Math.floor(number)):0;
+  return [Math.floor(seconds/3600),Math.floor(seconds%3600/60),seconds%60].map(n=>String(n).padStart(2,'0')).join(':');
+}
 const tag = (status) => `<span class="tag ${escape(status)}">${escape(statusLabels[status]||status)}</span>`;
 const empty = (text) => `<div class="empty"><span class="empty-symbol">❋</span>${escape(text)}</div>`;
 const button = (text, action, extra = '', cls = 'secondary small') => `<button class="button ${cls}" data-action="${action}" ${extra}>${text}</button>`;
@@ -35,15 +39,15 @@ function heading(title, subtitle, action = '') {
 function stats() {
   const s=dashboard.stats;
   return `<div class="stats">${[
-    ['Poll answers',s.responses,'Across daily polls','▤'],['Time together',hours(s.voice_seconds)+' h','Total member voice time','◉'],
-    ['Time spent solo',hours(s.solo_seconds)+' h','Already counted in voice time','◌'],['Active members',s.members,'People who joined voice','♧']
-  ].map(([label,value,note,icon])=>`<article class="stat"><div class="stat-label">${label}<span>${icon}</span></div><span class="stat-value">${value}</span><small>${note}</small></article>`).join('')}</div>`;
+    ['Poll answers',s.responses,'Across daily polls','▤'],['Time together',duration(s.voice_seconds),'Total voice time · hh:mm:ss','◉'],
+    ['Time spent solo',duration(s.solo_seconds),'Included in voice time · hh:mm:ss','◌'],['Active members',s.members,'People who joined voice','♧']
+  ].map(([label,value,note,icon])=>`<article class="stat"><div class="stat-label">${label}<span>${icon}</span></div><span class="stat-value${String(value).includes(':')?' duration-value':''}">${value}</span><small>${note}</small></article>`).join('')}</div>`;
 }
 function scheduleCard() {
   const s=dashboard.settings;
   return `<article class="panel"><div class="panel-head"><h2>The daily rhythm</h2><button class="text-button" data-page="schedule">Manage ↗</button></div>
-  <div class="schedule-item"><span class="schedule-clock">${escape(s.poll_time)}</span><div><strong>Tonight's game poll</strong><small>Ask who's joining the evening</small></div>${tag(s.poll_enabled?'enabled':'paused')}</div>
-  <hr class="divider"><div class="schedule-item"><span class="schedule-clock">${escape(s.report_time)}</span><div><strong>Daily summary</strong><small>Votes, start times & reasons</small></div>${tag(s.report_enabled?'enabled':'paused')}</div>
+  <div class="schedule-item"><span class="schedule-clock">${escape(clockTime(s.poll_time))}</span><div><strong>Tonight's game poll</strong><small>Ask who's joining the evening</small></div>${tag(s.poll_enabled?'enabled':'paused')}</div>
+  <hr class="divider"><div class="schedule-item"><span class="schedule-clock">${escape(clockTime(s.report_time))}</span><div><strong>Daily summary</strong><small>Votes, start times & reasons</small></div>${tag(s.report_enabled?'enabled':'paused')}</div>
   <p class="hint">Every day · Asia/Bangkok<br>Voice and solo activity is only visible here, never posted to Discord.</p></article>`;
 }
 function liveCard() {
@@ -65,9 +69,9 @@ function overview() {
   <div class="period-label">LAST 30 DAYS <span class="inline-note">${scheduled} scheduled post${scheduled===1?'':'s'}</span></div>${stats()}
   <div class="grid-two">${liveCard()}${scheduleCard()}</div>
   <div class="grid-two"><article class="panel"><div class="panel-head"><h2>Recent polls & posts</h2><button class="text-button" data-page="events">View all ↗</button></div>${eventTable(dashboard.events.slice(0,5))}</article>
-  <article class="panel"><div class="panel-head"><h2>Time well spent</h2><small>Voice hours · 30 days</small></div>${memberChart()}<p class="hint">Per-person totals include solo time. A room with two people records time for both.</p></article></div>`;
+  <article class="panel"><div class="panel-head"><h2>Time well spent</h2><small>Voice time · 30 days</small></div>${memberChart()}<p class="hint">Times use hh:mm:ss. Per-person totals include solo time. A room with two people records time for both.</p></article></div>`;
 }
-function memberChart(){ const people=dashboard.members.slice(0,5);const max=people[0]?.seconds||1;return people.length?`<div class="chart">${people.map(p=>`<div class="chart-row"><span>${escape(p.name)}</span><meter min="0" max="${max}" value="${p.seconds}" aria-label="${escape(p.name)} voice time"></meter><span>${hours(p.seconds)} h</span></div>`).join('')}</div>`:empty('Voice history will appear here once people start hanging out in voice.'); }
+function memberChart(){ const people=dashboard.members.slice(0,5);const max=people[0]?.seconds||1;return people.length?`<div class="chart">${people.map(p=>`<div class="chart-row"><span>${escape(p.name)}</span><meter min="0" max="${max}" value="${p.seconds}" aria-label="${escape(p.name)} voice time"></meter><span>${duration(p.seconds)}</span></div>`).join('')}</div>`:empty('Voice history will appear here once people start hanging out in voice.'); }
 function eventsPage(){
   return heading('Plans worth showing up for.','One-time polls, news, and announcements — all in one place.',`<button class="button" data-page="create">＋ Create new</button>`)
   +`<section class="panel"><div class="filterbar"><input type="search" id="event-search" placeholder="Search polls and posts…" aria-label="Search polls and posts"><select id="event-filter" aria-label="Filter by status">${[['all','All statuses'],['draft','Draft'],['scheduled','Scheduled'],['open','Voting open'],['published','Published'],['closed','Voting closed'],['review','Needs a check'],['cancelled','Cancelled']].map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></div><div id="event-table">${eventTable(dashboard.events)}</div></section>
@@ -93,7 +97,7 @@ function createPage(data={}) {
 }
 function preview(){if(!$('#event-form'))return;const f=$('#event-form').elements;const poll=f.kind.value==='poll';$('#poll-fields').hidden=!poll;$('#close-field').hidden=!poll;f.closes_at.required=poll;f.body.required=!poll;$('#preview-title').textContent=f.title.value||'Your next great plan';$('#preview-body').textContent=f.body.value||'Add the details and watch your post take shape.';$('#preview-options').innerHTML=poll?f.options.value.split('\n').filter(x=>x.trim()).slice(0,10).map(x=>`<span>${escape(x)}</span>`).join(''):'';$('#preview-time').textContent=poll?`Voting closes ${f.closes_at.value.replace('T',' ')} · Bangkok`:'Teemo · '+f.kind.value;}
 function voicePage(){
-  return heading('A pulse on your people.','Voice time and solo periods over the last 30 days.',button('↓ Export voice CSV','export','data-kind="voice"','secondary'))+stats()
+  return heading('A pulse on your people.','Voice time and solo periods over the last 30 days · hh:mm:ss.',button('↓ Export voice CSV','export','data-kind="voice"','secondary'))+stats()
   +`<div class="grid-two">${liveCard()}<article class="panel"><div class="panel-head"><h2>Most time in voice</h2><small>30 days</small></div>${memberChart()}</article></div>
   <section class="panel grid-two-panel"><div class="panel-head"><h2>Member activity</h2><span class="muted">Solo time is part of total voice time</span></div>${dashboard.members.length?`<div class="table-wrap"><table><thead><tr><th>MEMBER</th><th>VOICE TIME</th><th>SOLO TIME</th><th>VOICE SESSIONS</th></tr></thead><tbody>${dashboard.members.map(m=>`<tr><td><span class="row-avatar">${escape(m.name[0])}</span>${escape(m.name)}</td><td>${duration(m.seconds)}</td><td>${duration(m.solo_seconds)}</td><td>${m.sessions}</td></tr>`).join('')}</tbody></table></div>`:empty('No voice activity in the last 30 days yet.')}</section>
   <section class="panel grid-two-panel"><div class="panel-head"><h2>Recent voice sessions</h2><small>Latest 250 · Export for all records in period</small></div>${voiceTable(dashboard.voice)}</section>
