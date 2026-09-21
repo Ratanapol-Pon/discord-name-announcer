@@ -290,7 +290,7 @@ main#content { max-width: 1550px; padding: 38px 40px 25px; margin: auto; min-hei
 }
 .stat-label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 .stat-label span { color: var(--accent); font-size: 16px; }
-.stat-value { font: 36px Georgia; letter-spacing: -1px; display: block; margin: 16px 0 10px; }
+.stat-value { font-family: inherit; font-size: 36px; font-weight: 400; font-variant-numeric: tabular-nums; letter-spacing: -.04em; display: block; margin: 16px 0 10px; }
 .stat-value.duration-value { font-family: inherit; font-size: clamp(1rem, 2.3vw, 1.75rem); font-variant-numeric: tabular-nums; letter-spacing: -.04em; white-space: nowrap; }
 .stat small { font-size: 10px; }
 
@@ -339,7 +339,7 @@ main#content { max-width: 1550px; padding: 38px 40px 25px; margin: auto; min-hei
 .room p { font-size: 11px; color: var(--muted); margin: 0; }
 .room .tag { margin-left: auto; }
 .schedule-item { display: flex; align-items: center; gap: 13px; padding: 13px 0; }
-.schedule-clock { font: 23px Georgia; min-width: 60px; }
+.schedule-clock { font-family: inherit; font-size: 23px; font-weight: 400; font-variant-numeric: tabular-nums; min-width: 60px; }
 .schedule-item strong { font-size: 12px; display: block; margin-bottom: 5px; }
 .schedule-item small { font-size: 10px; }
 .schedule-item .tag { margin-left: auto; }
