@@ -1,3 +1,11 @@
+.period-controls { margin: 24px 40px 0; display: flex; align-items: end; flex-wrap: wrap; gap: 14px; }
+.period-controls label { display: grid; gap: 6px; font-size: 14px; }
+.period-controls small { flex-basis: 100%; }
+#summary-preview p { white-space: pre-wrap; }
+#template-form label { display: grid; gap: 8px; }
+#template-form .form-row { flex-wrap: wrap; }
+#content td small { display: block; white-space: normal; margin-top: 6px; }
+@media (max-width: 760px) { .period-controls { margin: 18px; } .period-controls label { flex: 1 1 130px; } }
 /* ==========================================================================
    Teemo Community Console — two themes:
    · light  "Warm & playful"  (default)

@@ -12,7 +12,9 @@ document.querySelectorAll('.theme-toggle').forEach(b=>b.addEventListener('click'
 applyTheme(document.documentElement.dataset.theme||'light');
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let session, dashboard, page = 'overview', csrf = '', editKey = null, busy = false, toastTimer;
-const labels = {overview:'Overview',events:'Polls & posts',create:'Create',voice:'Voice activity',schedule:'Daily schedule'};
+let periodQuery = 'period=30days';
+const periodLabel = () => dashboard?.period ? `${dashboard.period.from} – ${dashboard.period.to}` : 'Last 30 days';
+const labels = {overview:'Overview',events:'Polls & posts',create:'Create',voice:'Voice activity',schedule:'Daily schedule',tasks:'Task history',templates:'Recurring templates',community:'Privacy & backups'};
 const statusLabels = {draft:'Draft',scheduled:'Scheduled',open:'Voting open',published:'Published',closed:'Voting closed',review:'Needs a check',cancelled:'Cancelled',enabled:'On',paused:'Paused',active:'Live now',solo:'Flying solo'};
 const fmtDate = (x) => x ? new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Bangkok',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(x)) : '—';
 const clockTime = (value) => /^\d{2}:\d{2}$/.test(String(value)) ? `${value}:00` : String(value||'—');
@@ -97,13 +99,13 @@ function createPage(data={}) {
 }
 function preview(){if(!$('#event-form'))return;const f=$('#event-form').elements;const poll=f.kind.value==='poll';$('#poll-fields').hidden=!poll;$('#close-field').hidden=!poll;f.closes_at.required=poll;f.body.required=!poll;$('#preview-title').textContent=f.title.value||'Your next great plan';$('#preview-body').textContent=f.body.value||'Add the details and watch your post take shape.';$('#preview-options').innerHTML=poll?f.options.value.split('\n').filter(x=>x.trim()).slice(0,10).map(x=>`<span>${escape(x)}</span>`).join(''):'';$('#preview-time').textContent=poll?`Voting closes ${f.closes_at.value.replace('T',' ')} · Bangkok`:'Teemo · '+f.kind.value;}
 function voicePage(){
-  return heading('A pulse on your people.','Voice time and solo periods over the last 30 days · hh:mm:ss.',button('↓ Export voice CSV','export','data-kind="voice"','secondary'))+stats()
+  return heading('A pulse on your people.',`Voice time and solo periods · ${periodLabel()} · hh:mm:ss.`,button('↓ Export voice CSV','export','data-kind="voice"','secondary'))+stats()
   +`<div class="grid-two">${liveCard()}<article class="panel"><div class="panel-head"><h2>Most time in voice</h2><small>30 days</small></div>${memberChart()}</article></div>
-  <section class="panel grid-two-panel"><div class="panel-head"><h2>Member activity</h2><span class="muted">Solo time is part of total voice time</span></div>${dashboard.members.length?`<div class="table-wrap"><table><thead><tr><th>MEMBER</th><th>VOICE TIME</th><th>SOLO TIME</th><th>VOICE SESSIONS</th></tr></thead><tbody>${dashboard.members.map(m=>`<tr><td><span class="row-avatar">${escape(m.name[0])}</span>${escape(m.name)}</td><td>${duration(m.seconds)}</td><td>${duration(m.solo_seconds)}</td><td>${m.sessions}</td></tr>`).join('')}</tbody></table></div>`:empty('No voice activity in the last 30 days yet.')}</section>
+  <section class="panel grid-two-panel"><div class="panel-head"><h2>Member activity</h2><span class="muted">Solo time is part of total voice time</span></div>${dashboard.members.length?`<div class="table-wrap"><table><thead><tr><th>MEMBER</th><th>VOICE TIME</th><th>SOLO TIME</th><th>VOICE SESSIONS</th></tr></thead><tbody>${dashboard.members.map(m=>`<tr><td>${button(escape(m.name),'member-detail',`data-user="${escape(m.user_id)}"`,'text-button')}</td><td>${duration(m.seconds)}</td><td>${duration(m.solo_seconds)}</td><td>${m.sessions}</td></tr>`).join('')}</tbody></table></div>`:empty('No voice activity in this period.')}</section>
   <section class="panel grid-two-panel"><div class="panel-head"><h2>Recent voice sessions</h2><small>Latest 250 · Export for all records in period</small></div>${voiceTable(dashboard.voice)}</section>
   <section class="panel grid-two-panel"><div class="panel-head"><h2>Time spent alone</h2>${button('↓ Export solo CSV','export','data-kind="solo"')}</div>${voiceTable(dashboard.solo)}<p class="hint">This counts time spent in a voice channel, not speaking or microphone activity. If Teemo was offline, a session's end time may be estimated.</p></section>`;
 }
-function voiceTable(rows){return rows.length?`<div class="table-wrap"><table><thead><tr><th>MEMBER</th><th>CHANNEL</th><th>STARTED · BANGKOK</th><th>ENDED</th><th>DURATION IN PERIOD</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escape(r.name)}</td><td>${escape(r.channel)}</td><td>${fmtDate(r.joined)}</td><td>${r.active?tag('active'):fmtDate(r.left)}</td><td>${duration(r.seconds)}</td></tr>`).join('')}</tbody></table></div>`:empty('No sessions in this period.');}
+function voiceTable(rows){return rows.length?`<div class="table-wrap"><table><thead><tr><th>MEMBER</th><th>CHANNEL</th><th>STARTED · BANGKOK</th><th>ENDED</th><th>DURATION IN PERIOD</th><th>DATA QUALITY</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escape(r.name)}</td><td>${escape(r.channel)}</td><td>${fmtDate(r.joined)}</td><td>${r.active?tag('active'):fmtDate(r.left)}</td><td>${duration(r.seconds)}</td><td>${escape(r.quality||'legacy / unknown')}</td></tr>`).join('')}</tbody></table></div>`:empty('No sessions in this period.');}
 function schedulePage(){const s=dashboard.settings;return heading('Set it. Let Teemo handle it.','The everyday routine for your server, in Bangkok time.')
   +`<div class="composer-grid"><section class="panel"><form id="schedule-form"><p class="section-label">YOUR DAILY TASKS</p><div class="form-row"><div class="field"><label for="poll-time">Daily game poll</label><input id="poll-time" type="time" name="poll_time" value="${escape(s.poll_time)}" required><label class="check"><input type="checkbox" name="poll_enabled" ${s.poll_enabled?'checked':''}> Send every day</label></div><div class="field"><label for="report-time">Daily summary</label><input id="report-time" type="time" name="report_time" value="${escape(s.report_time)}" required><label class="check"><input type="checkbox" name="report_enabled" ${s.report_enabled?'checked':''}> Send every day</label></div></div>
   <div class="field"><label>Daily poll channels</label>${session.channels.map(c=>`<label class="check"><input type="checkbox" name="poll_channels" value="${c.id}" ${s.poll_channel_ids.includes(c.id)?'checked':''}> #${escape(c.name)}</label>`).join('')}<small>Close today's poll before removing its destination channel.</small></div>
@@ -113,10 +115,12 @@ function schedulePage(){const s=dashboard.settings;return heading('Set it. Let T
 function render(data){
   $('#breadcrumb').textContent='Workspace / '+labels[page];
   document.querySelectorAll('.nav-item').forEach(el=>{el.classList.toggle('active',el.dataset.page===page);el.setAttribute('aria-current',el.dataset.page===page?'page':'false');});
+  if(['tasks','templates','community'].includes(page)){renderCommunity();return;}
   $('#content').innerHTML=page==='overview'?overview():page==='events'?eventsPage():page==='voice'?voicePage():page==='schedule'?schedulePage():createPage(data);
+  $('#content').querySelectorAll('.period-label, .panel-head small').forEach(el=>{el.textContent=el.textContent.replace(/LAST 30 DAYS|Last 30 days|30 days/g,periodLabel());});
   if(page==='create')preview();
 }
-async function refresh(){dashboard=await api('dashboard');session.settings=dashboard.settings;$('#updated').textContent='Refreshed '+fmtDate(dashboard.fetched_at);$('#connection').textContent=dashboard.health.discord?'Teemo connected':'Teemo reconnecting';if(page!=='create'&&page!=='schedule')render();}
+async function refresh(){dashboard=await api('dashboard?'+periodQuery);session.settings=dashboard.settings;$('#updated').textContent='Refreshed '+fmtDate(dashboard.fetched_at);$('#connection').textContent=dashboard.health.discord?'Teemo connected':'Teemo reconnecting';if(!['create','schedule','templates','community'].includes(page))render();}
 async function details(key){$('#detail-content').innerHTML='<div class="loading">Loading details…</div>';$('#detail-dialog').showModal();const {event:e,votes}=await api('events/'+key);const counts=e.options.map((_,i)=>votes.filter(v=>v.choice===i).length);const max=Math.max(...counts,1);$('#detail-content').innerHTML=`<h2 class="detail-title">${escape(e.title)}</h2><div class="detail-meta">${tag(e.status)}<span class="muted">${escape(e.kind)} · #${escape(channelName(e.channel_id))}</span></div><p class="detail-body">${escape(e.body)}</p>
   <p class="hint">Publish: ${e.publish_at?fmtDate(e.publish_at):'When approved'}${e.closes_at?' · Voting closes: '+fmtDate(e.closes_at):''}${e.event_at?'<br>Event starts: '+fmtDate(e.event_at):''}</p>
   ${e.error?`<div class="alert">${escape(e.error)}</div>`:''}
@@ -133,8 +137,8 @@ document.addEventListener('click',async ev=>{
   busy=true;target.disabled=true;
   try{
     if(action==='detail')await details(key);
-    else if(action==='daily-detail')dailyDetails(key);
-    else if(action==='export'){const response=await fetch('/api/export?kind='+target.dataset.kind);if(!response.ok)throw new Error('Export failed. Refresh and try again.');const blob=await response.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`teemo-${target.dataset.kind}-30days.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);}
+    else if(action==='daily-detail'){dailyDetails(key);if(typeof summaryControls==='function')summaryControls(key);}
+    else if(action==='export'){const response=await fetch('/api/export?kind='+target.dataset.kind+'&'+periodQuery);if(!response.ok)throw new Error('Export failed. Refresh and try again.');const blob=await response.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`teemo-${target.dataset.kind}-${dashboard.period.from}-to-${dashboard.period.to}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);}
     else if(action==='edit'||action==='duplicate'){const {event}=await api('events/'+key);editKey=action==='edit'?key:null;if(!editKey){event.publish_at=null;event.closes_at=null;event.title+=' (copy)';}page='create';$('#detail-dialog').close();render(event);}
     else if(action.startsWith('event-')){
       const op=action.slice(6);
@@ -144,13 +148,14 @@ document.addEventListener('click',async ev=>{
     }else if(action==='run-poll'||action==='run-report'){
       if(action==='run-report'&&!confirm("Post today's summary now? This closes today's daily poll."))return;
       const result=await api('daily/'+(action==='run-poll'?'poll':'report'),{});toast(result.message);await refresh();
-    }
+    }else if(typeof communityAction==='function')await communityAction(action,target);
   }catch(error){toast(error.message,true);}finally{busy=false;target.disabled=false;}
 });
 document.addEventListener('input',ev=>{if(ev.target.closest('#event-form'))preview();if(['event-search','event-filter'].includes(ev.target.id))filterEvents();});
 document.addEventListener('change',ev=>{if(ev.target.closest('#event-form'))preview();if(ev.target.id==='event-filter')filterEvents();});
 function filterEvents(){const query=$('#event-search').value.toLowerCase(),status=$('#event-filter').value;$('#event-table').innerHTML=eventTable(dashboard.events.filter(e=>e.title.toLowerCase().includes(query)&&(status==='all'||e.status===status)));}
 document.addEventListener('submit',async ev=>{
+  if(['period-controls','template-form','community-form'].includes(ev.target.id))return;
   ev.preventDefault();if(busy)return;const form=ev.target;const submit=form.querySelector('[type="submit"]');busy=true;submit.disabled=true;
   try{
     if(form.id==='event-form'){

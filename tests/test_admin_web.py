@@ -207,6 +207,30 @@ class WebSecurityTests(unittest.IsolatedAsyncioTestCase):
         await self.client.post("/api/logout", json={}, headers=self.headers)
         self.assertEqual(401, (await self.client.get("/api/session")).status)
 
+    async def test_new_private_tools_require_login_and_csrf(self):
+        for path in ("/api/members/1", "/api/tasks", "/api/templates", "/api/community", "/api/backups/" + "a" * 32):
+            self.assertEqual(401, (await self.client.get(path)).status)
+        await self.sign_in()
+        for path in ("/api/reports/action", "/api/tasks/recover", "/api/templates", "/api/community/config", "/api/backups/create", "/api/backups/" + "a" * 32 + "/restore"):
+            response = await self.client.post(path, json={}, headers={"Origin":self.admin.public_url})
+            self.assertEqual(403, response.status)
+
+    async def test_period_filters_and_member_details_use_selected_dates(self):
+        await self.sign_in()
+        from planning import BANGKOK
+        now = utcnow().astimezone(BANGKOK)
+        await self.store._create("Voice Sessions", {"User ID":"1", "Guild ID":"99", "Display Name":"Rz", "Joined At":(now-timedelta(minutes=3)).isoformat(), "Left At":now.isoformat(), "Data Quality":"recorded"})
+        response = await self.client.get("/api/dashboard?period=today")
+        self.assertEqual(200, response.status)
+        data = await response.json()
+        self.assertEqual(now.date().isoformat(), data["period"]["from"])
+        self.assertEqual("1", data["members"][0]["user_id"])
+        detail = await (await self.client.get("/api/members/1?period=today")).json()
+        self.assertEqual(1, len(detail["voice"]))
+        other = await (await self.client.get("/api/members/2?period=today")).json()
+        self.assertEqual([], other["voice"])
+        self.assertEqual(400, (await self.client.get("/api/dashboard?period=custom&from=bad&to=bad")).status)
+
 
 class EventLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_record_does_not_block_other_events(self):

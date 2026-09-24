@@ -21,6 +21,7 @@ class YearlySummary:
         self.get_channel_id = get_channel_id
         self.enabled = enabled
         self.last_error = None
+        self.member_visible = lambda guild_id, user_id: True
 
     def is_due(self, now):
         if now.tzinfo is None:
@@ -152,6 +153,11 @@ class YearlySummary:
                 )
                 totals = await self.totals(guild_id, year)
                 voice_members = await self.voice_totals(guild_id, year)
+                voice_members = [
+                    p
+                    for p in voice_members
+                    if self.member_visible(guild_id, p["user_id"])
+                ]
                 if (
                     voice_members
                     and not channel.permissions_for(channel.guild.me).attach_files
@@ -182,7 +188,7 @@ class YearlySummary:
                             " ".join(person["name"].split())[:70]
                         )
                         body += f"{name}: **{person['seconds'] / 3600:,.1f} h**\n"
-                    body += "\nThe attached CSV lists every member with recorded voice time.\n"
+                    body += "\nThe attached CSV lists members with recorded voice time who allow public yearly totals.\n"
                 else:
                     body += "\nNo voice time was recorded for this period.\n"
                 body += (

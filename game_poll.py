@@ -6,7 +6,9 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from datetime import date, datetime
+from datetime import time as clock_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import discord
 
@@ -16,6 +18,7 @@ from airtable_store import (
     PollClosedError,
     PollNotFoundError,
 )
+from planning import GAMES, validate_plan
 
 LOGGER = logging.getLogger(__name__)
 POLL_QUESTION = "Does anyone want to play any game tonight?"
@@ -33,8 +36,11 @@ def poll_embed(
         name="How to answer",
         value=(
             "Choose **Yes**, **Maybe**, or **No** below. "
-            "Choosing **Yes** asks for your preferred start time. "
-            "Choosing **No** opens a required reason form."
+            "Choosing **Yes** asks for your start time, games and availability. "
+            "Choosing **No** opens a required reason form. "
+            "No reasons may appear in the summary (server setting). "
+            "Voice presence is recorded for admins, not audio. "
+            "Use /teemo_preferences for tracking and optional reminder controls."
         ),
         inline=False,
     )
@@ -92,7 +98,9 @@ def report_embed(
     if counts["yes"]:
         intro = "Who's up for a game? Find your teammates below!"
     elif counts["maybe"]:
-        intro = "Plans are still flexible — check in with each other before making plans."
+        intro = (
+            "Plans are still flexible — check in with each other before making plans."
+        )
     elif total:
         intro = "A quiet night for the squad. Catch you next time!"
     else:
@@ -129,7 +137,7 @@ def report_embed(
                     else _summary_text(play_time, 40) or "Time not selected"
                 )
                 line += f" — {time_label}"
-            elif choice == "no":
+            elif choice == "no" and report.get("public_reasons", True):
                 reason = response.get("reason") or reasons.get(
                     str(response.get("user_id"))
                 )
@@ -139,6 +147,14 @@ def report_embed(
         embed.add_field(
             name=f"{label} · {counts[choice]}",
             value=_summary_lines(lines, empty),
+            inline=False,
+        )
+    suggestion = report.get("suggestion")
+    if suggestion:
+        embed.add_field(
+            name="🎯 Suggested plan — confirm together",
+            value=f"**{_summary_text(suggestion['game'], 80)} · {suggestion['time']}**\n"
+            f"{suggestion['count']} people have at least 30 minutes of overlapping availability. This is not a confirmed booking.",
             inline=False,
         )
     embed.set_footer(
@@ -190,6 +206,12 @@ class YesTimeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if self.service.community:
+            await interaction.response.edit_message(
+                content="Choose games and when you need to finish. Flexible starts at 18:00. Reminders are optional and use Bangkok time.",
+                view=GamePlanView(self.service, self.message_id, self.values[0]),
+            )
+            return
         await self.service.save_interaction_response(
             interaction,
             self.message_id,
@@ -203,6 +225,57 @@ class YesTimeView(discord.ui.View):
     def __init__(self, service: GamePollService, message_id: int) -> None:
         super().__init__(timeout=300)
         self.add_item(YesTimeSelect(service, message_id))
+
+
+class GamePlanView(discord.ui.View):
+    def __init__(self, service, message_id, start):
+        super().__init__(timeout=300)
+        self.service, self.message_id, self.start = service, message_id, start
+        self.games, self.until, self.reminder = ["Any game"], "23:59", False
+
+    @discord.ui.select(
+        placeholder="Choose up to 4 games (default: Any game)",
+        min_values=1,
+        max_values=4,
+        options=[discord.SelectOption(label=g) for g in GAMES],
+        row=0,
+    )
+    async def choose_games(self, interaction, select):
+        self.games = select.values
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="Available until (default: 23:59)",
+        options=[
+            discord.SelectOption(label=t) for t in (*PLAY_TIME_OPTIONS[2:], "23:59")
+        ],
+        row=1,
+    )
+    async def choose_end(self, interaction, select):
+        self.until = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="Reminder: Off", style=discord.ButtonStyle.secondary, row=2
+    )
+    async def toggle_reminder(self, interaction, button):
+        self.reminder = not self.reminder
+        button.label = "Reminder: On (DM)" if self.reminder else "Reminder: Off"
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(
+        label="Save Yes + plan", style=discord.ButtonStyle.success, row=2
+    )
+    async def save(self, interaction, button):
+        plan = {"games": self.games, "until": self.until, "reminder": self.reminder}
+        try:
+            validate_plan(plan, self.start)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await self.service.save_interaction_response(
+            interaction, self.message_id, "yes", None, self.start, plan=plan
+        )
 
 
 class GamePollView(discord.ui.View):
@@ -269,6 +342,8 @@ class GamePollService:
         self.channel_ids = channel_ids
         self.timezone_name = timezone_name
         self.report_time = report_time
+        self.community = None
+        self.poll_time = "11:59"
         self._poll_lifecycle_lock = asyncio.Lock()
         self._delivery_lock = asyncio.Lock()
 
@@ -316,13 +391,58 @@ class GamePollService:
         if poll.get("message_id"):
             return False
 
-        message = await channel.send(
-            embed=poll_embed(poll_date, self.timezone_name, self.report_time),
-            view=GamePollView(self),
-            allowed_mentions=discord.AllowedMentions.none(),
+        embed = poll_embed(poll_date, self.timezone_name, self.report_time)
+        return await self.deliver_daily(
+            channel, poll, poll_date, "poll", embed, GamePollView(self)
         )
-        await self.store.set_poll_message(poll["id"], message.id)
-        return True
+
+    async def deliver_daily(self, channel, poll, poll_date, action, embed, view=None):
+        task = None
+        if self.community:
+            key = f"daily:{action}:{channel.id}:{poll_date}"
+            existing = self.community.get(key)
+            if existing and existing.get("status") in {"running", "review", "sent"}:
+                return False
+            clock = self.poll_time if action == "poll" else self.report_time
+            expected = datetime.combine(
+                poll_date, clock_time.fromisoformat(clock), ZoneInfo(self.timezone_name)
+            )
+            task = await self.community.begin_task(
+                key,
+                channel.guild.id,
+                action=action,
+                channel_id=str(channel.id),
+                poll_id=poll["id"],
+                date=poll_date.isoformat(),
+                expected_at=expected.isoformat(),
+            )
+            embed.set_footer(text=f"{embed.footer.text} • {key}")
+        try:
+            message = await channel.send(
+                embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+            setter = (
+                self.store.set_poll_message
+                if action == "poll"
+                else self.store.set_report_message
+            )
+            await setter(poll["id"], message.id)
+            if task:
+                await self.community.finish_task(
+                    task,
+                    "sent",
+                    message_id=str(message.id),
+                    completed_at=datetime.now().astimezone().isoformat(),
+                )
+            return True
+        except Exception:
+            if task:
+                await self.community.finish_task(
+                    task,
+                    "review",
+                    error="Delivery uncertain. Check task history before resending.",
+                )
+            raise
 
     async def save_interaction_response(
         self,
@@ -331,12 +451,24 @@ class GamePollService:
         choice: str,
         reason: str | None,
         play_time: str | None = None,
+        plan: dict | None = None,
     ) -> None:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
         display_name = getattr(interaction.user, "display_name", interaction.user.name)
         try:
             async with self._poll_lifecycle_lock:
+                if plan and self.community:
+                    poll = await self.store.get_poll_by_message(message_id)
+                    if (
+                        not poll
+                        or poll["status"] != "open"
+                        or poll["guild_id"] != interaction.guild_id
+                    ):
+                        raise ValueError("This poll is closed or unavailable.")
+                    await self.community.save_plan(
+                        poll, interaction.user.id, plan, play_time
+                    )
                 poll_id = await self.store.record_response(
                     message_id,
                     interaction.user.id,
@@ -345,10 +477,21 @@ class GamePollService:
                     reason,
                     play_time,
                 )
+                if plan and self.community:
+                    await self.community.confirm_plan(poll_id, interaction.user.id)
                 voice_channel = getattr(
                     getattr(interaction.user, "voice", None), "channel", None
                 )
-                if choice == "yes" and voice_channel is not None:
+                if (
+                    choice == "yes"
+                    and voice_channel is not None
+                    and (
+                        not self.community
+                        or self.community.tracking(
+                            interaction.guild_id, interaction.user.id
+                        )
+                    )
+                ):
                     await self.store.mark_yes_voice_join(
                         poll_id,
                         interaction.user.id,
@@ -377,6 +520,8 @@ class GamePollService:
         poll_date: date,
     ) -> bool:
         """Mark a Yes voter as attended when they first join server voice."""
+        if self.community and not self.community.tracking(member.guild.id, member.id):
+            return False
         async with self._poll_lifecycle_lock:
             for poll_channel_id in self.channel_ids:
                 poll = await self.store.get_poll(poll_channel_id, poll_date)
@@ -395,6 +540,8 @@ class GamePollService:
         occurred_at: datetime | None = None,
     ) -> None:
         """Persist joins, leaves, and channel moves for every human member."""
+        if self.community and not self.community.tracking(member.guild.id, member.id):
+            return
         if before_channel is not None:
             await self.store.stop_voice_session(
                 member.guild.id, member.id, left_at=occurred_at
@@ -426,7 +573,10 @@ class GamePollService:
         for channel in unique_channels.values():
             humans = [member for member in channel.members if not member.bot]
             solo_member = None
-            if len(humans) == 1:
+            if len(humans) == 1 and (
+                not self.community
+                or self.community.tracking(channel.guild.id, humans[0].id)
+            ):
                 solo_member = {
                     "user_id": humans[0].id,
                     "display_name": humans[0].display_name,
@@ -449,7 +599,14 @@ class GamePollService:
         for guild in self.bot.guilds:
             for member in guild.members:
                 channel = getattr(getattr(member, "voice", None), "channel", None)
-                if member.bot or channel is None:
+                if (
+                    member.bot
+                    or channel is None
+                    or (
+                        self.community
+                        and not self.community.tracking(guild.id, member.id)
+                    )
+                ):
                     continue
                 connected_members.append(
                     {
@@ -490,6 +647,10 @@ class GamePollService:
             if len(entry["members"]) != 1:
                 continue
             member = entry["members"][0]
+            if self.community and not self.community.tracking(
+                entry["guild_id"], member.id
+            ):
+                continue
             solo_channels.append(
                 {
                     "guild_id": entry["guild_id"],
@@ -532,6 +693,10 @@ class GamePollService:
                 await self.store.close_poll(poll["id"])
             if not report:
                 responses = await self.store.get_responses(poll["id"])
+                if self.community:
+                    responses = self.community.enrich(poll, {"responses": responses})[
+                        "responses"
+                    ]
                 report = await self.store.save_report(poll["id"], responses)
 
         try:
@@ -542,9 +707,12 @@ class GamePollService:
                 "Could not disable buttons on poll message %s", poll["message_id"]
             )
 
-        summary_message = await channel.send(
-            embed=report_embed(poll_date, self.timezone_name, report, self.report_time),
-            allowed_mentions=discord.AllowedMentions.none(),
+        if self.community:
+            report = self.community.enrich(poll, report)
+        return await self.deliver_daily(
+            channel,
+            poll,
+            poll_date,
+            "report",
+            report_embed(poll_date, self.timezone_name, report, self.report_time),
         )
-        await self.store.set_report_message(poll["id"], summary_message.id)
-        return True

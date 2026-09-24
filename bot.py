@@ -32,6 +32,9 @@ from dotenv import load_dotenv
 from admin_web import AdminWeb
 from airtable_store import AirtablePollStore
 from event_manager import EventManager
+from community import Community
+from backups import Backups
+from planning import minutes
 from game_poll import GamePollService, GamePollView
 from yearly_summary import YearlySummary
 
@@ -201,6 +204,7 @@ def _apply_runtime_settings(
     if game_poll_service:
         game_poll_service.channel_ids = list(dict.fromkeys(poll_channel_ids))
         game_poll_service.report_time = f"{report_clock:%H:%M}"
+        game_poll_service.poll_time = f"{poll_clock:%H:%M}"
 
     daily_game_poll.change_interval(time=poll_clock.replace(tzinfo=BOT_TIMEZONE))
     daily_game_poll_report.change_interval(
@@ -417,6 +421,8 @@ async def on_ready():
 
     if game_poll_service and not poll_runtime_started:
         try:
+            if web_admin and web_admin.community and not web_admin.community.ready:
+                await web_admin.community.restore()
             await game_poll_service.store.healthcheck()
         except Exception:
             LOGGER.exception(
@@ -1054,6 +1060,53 @@ async def admin_only_error(interaction: discord.Interaction, error):
         raise error
 
 
+@bot.tree.command(name="teemo_preferences", description="Your voice-tracking privacy, reminders and quiet hours")
+@app_commands.guild_only()
+@app_commands.describe(tracking="Record future voice/solo sessions and attendance", reminders="Allow optional game-plan DM reminders",
+                       public_yearly="Include your voice totals in future public yearly recaps",
+                       quiet_start="Bangkok HH:MM; default 23:00", quiet_end="Bangkok HH:MM; default 09:00; same as start disables quiet hours")
+async def teemo_preferences(interaction: discord.Interaction, tracking: bool | None = None,
+                            reminders: bool | None = None, public_yearly: bool | None = None,
+                            quiet_start: str | None = None, quiet_end: str | None = None):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        community = web_admin.community if web_admin else None
+        if not community or not community.ready:
+            raise ValueError("Your preferences are loading. Please try again shortly.")
+        prefs = community.preferences(interaction.guild_id, interaction.user.id)
+        changed = any(v is not None for v in (tracking, reminders, public_yearly, quiet_start, quiet_end))
+        if changed:
+            for key, value in (("tracking", tracking), ("reminders", reminders), ("public_yearly", public_yearly), ("quiet_start", quiet_start), ("quiet_end", quiet_end)):
+                if value is not None:
+                    prefs[key] = value
+            minutes(prefs["quiet_start"])
+            minutes(prefs["quiet_end"])
+            async with game_poll_service._poll_lifecycle_lock:
+                await community.put(f"prefs:{interaction.guild_id}:{interaction.user.id}", interaction.guild_id, "prefs", prefs)
+                channel = getattr(getattr(interaction.user, "voice", None), "channel", None)
+                if tracking is False:
+                    await community.store.stop_voice_session(interaction.guild_id, interaction.user.id)
+                elif tracking is True and channel:
+                    await game_poll_service.track_voice_session(interaction.user, None, channel, datetime.now(BOT_TIMEZONE).date())
+                if channel:
+                    await game_poll_service.track_solo_voice_channels((channel,), datetime.now(BOT_TIMEZONE).date())
+            web_admin.cache.clear()
+        await interaction.followup.send(
+            ("Preferences saved.\n" if changed else "Your current preferences:\n") +
+            f"Voice tracking: **{'On' if prefs.get('tracking', True) else 'Paused'}**\n"
+            f"Optional DM reminders: **{'On' if prefs.get('reminders', False) else 'Off'}**\n"
+            f"Public yearly voice totals: **{'On' if prefs.get('public_yearly', True) else 'Off'}**\n"
+            f"Quiet hours: **{prefs['quiet_start']}–{prefs['quiet_end']} Bangkok**\n\n"
+            "Teemo records voice presence, not audio. Pausing stops future voice/solo and attendance tracking; existing records remain. "
+            "Poll votes remain saved. Turning reminders on still requires opting in on each game plan. "
+            "No-vote reasons may be public depending on the server setting. Ask an admin about existing records.", ephemeral=True)
+    except ValueError as exc:
+        await interaction.followup.send(str(exc), ephemeral=True)
+    except Exception:
+        LOGGER.exception("Member preference update failed")
+        await interaction.followup.send("Preferences could not be fully applied. Please retry; any saved opt-out remains in effect.", ephemeral=True)
+
+
 async def main():
     global web_admin
     async with bot:
@@ -1068,11 +1121,15 @@ async def main():
         events = EventManager(bot, game_poll_service.store)
         web_admin = AdminWeb(bot, game_poll_service.store, events, _web_settings,
                              _web_save_settings, _web_daily_action, public_url)
+        community = Community(bot, game_poll_service.store, game_poll_service, events)
+        game_poll_service.community = web_admin.community = community
+        web_admin.backups = Backups(community, os.getenv("BACKUP_DIR", os.path.join(os.path.dirname(os.path.abspath(CLIP_DIR)), "backups")))
         web_admin.yearly_summary = YearlySummary(
             events, BOT_TIMEZONE, YEARLY_SUMMARY_CLOCK,
             lambda: (announcement_channel_id or game_poll_service.channel_ids[0]) if poll_runtime_started else None,
             enabled=YEARLY_SUMMARY_ENABLED,
         )
+        web_admin.yearly_summary.member_visible = lambda guild_id, user_id: community.ready and community.preferences(guild_id, user_id).get("public_yearly", True)
         LOGGER.info("Yearly summary: enabled=%s, December 25 at %s (%s)",
                     YEARLY_SUMMARY_ENABLED, YEARLY_SUMMARY_CLOCK.strftime("%H:%M"), TIMEZONE_NAME)
         runner = web.AppRunner(web_admin.app, access_log=None)

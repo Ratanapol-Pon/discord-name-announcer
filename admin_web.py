@@ -9,12 +9,14 @@ import logging
 import secrets
 import time
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import time as clock_time
 from pathlib import Path
 
 from aiohttp import web
 
 from event_manager import timestamp, utcnow
+from planning import BANGKOK, report_period
 
 LOGGER = logging.getLogger(__name__)
 ASSETS = Path(__file__).parent / "web"
@@ -35,6 +37,8 @@ class AdminWeb:
         self.started = time.monotonic()
         self.worker = None
         self.yearly_summary = None
+        self.community = None
+        self.backups = None
         self.yearly_checked_at = float("-inf")
         self.app = web.Application(middlewares=[self.boundary], client_max_size=24000)
         self.app.add_routes(
@@ -43,11 +47,24 @@ class AdminWeb:
                 web.get("/healthz", self.health),
                 web.get("/assets/app.js", self.javascript),
                 web.get("/assets/style.css", self.styles),
+                web.get("/assets/community.js", self.community_javascript),
                 web.post("/api/login", self.login),
                 web.post("/api/logout", self.logout),
                 web.get("/api/session", self.session_info),
                 web.get("/api/dashboard", self.dashboard),
                 web.get("/api/export", self.export),
+                web.get("/api/members/{user_id}", self.member_detail),
+                web.get("/api/tasks", self.task_history),
+                web.post("/api/reports/action", self.report_action),
+                web.post("/api/tasks/recover", self.task_recover),
+                web.get("/api/templates", self.templates_list),
+                web.post("/api/templates", self.template_create),
+                web.post("/api/templates/{key}/{action}", self.template_action),
+                web.get("/api/community", self.community_info),
+                web.post("/api/community/config", self.community_config),
+                web.post("/api/backups/create", self.backup_create),
+                web.get("/api/backups/{key}", self.backup_download),
+                web.post("/api/backups/{key}/restore", self.backup_restore),
                 web.post("/api/settings", self.settings),
                 web.post("/api/daily/{action}", self.daily),
                 web.get("/api/events", self.events_list),
@@ -146,6 +163,9 @@ class AdminWeb:
     async def styles(self, request):
         return web.FileResponse(ASSETS / "style.css")
 
+    async def community_javascript(self, request):
+        return web.FileResponse(ASSETS / "community.js")
+
     async def health(self, request):
         return web.json_response({"web": "online", "discord": self.bot.is_ready()})
 
@@ -201,9 +221,11 @@ class AdminWeb:
             }
         )
 
-    async def snapshot(self, guild_id):
+    async def snapshot(self, guild_id, start=None, end=None):
+        start, end = (start, end) if start and end else report_period({})
+        cache_key = (guild_id, start.isoformat(), end.isoformat())
         async with self.cache_lock:
-            cached = self.cache.get(guild_id)
+            cached = self.cache.get(cache_key)
             if cached and time.monotonic() - cached[0] < 60:
                 return cached[1]
             formula = self.store._formula_equals("Guild ID", str(guild_id))
@@ -211,8 +233,13 @@ class AdminWeb:
             polls, voice, solo = await asyncio.gather(
                 *(self.store.list_records(t, formula) for t in tables)
             )
-            cutoff = (utcnow() - timedelta(days=30)).date().isoformat()
-            polls = [r for r in polls if r["fields"].get("Poll Date", "") >= cutoff]
+            polls = [
+                r
+                for r in polls
+                if start.date().isoformat()
+                <= r["fields"].get("Poll Date", "")
+                < end.date().isoformat()
+            ]
             ids = [r["id"] for r in polls]
             responses = []
             for offset in range(0, len(ids), 40):
@@ -232,12 +259,15 @@ class AdminWeb:
                 "responses": responses,
                 "fetched_at": utcnow().isoformat(),
             }
-            self.cache[guild_id] = (time.monotonic(), result)
+            if len(self.cache) > 30:
+                self.cache.clear()
+            self.cache[cache_key] = (time.monotonic(), result)
             return result
 
-    def voice_data(self, rows, solo=False):
+    def voice_data(self, rows, solo=False, start=None, finish=None):
         now = utcnow()
-        start = now - timedelta(days=30)
+        start = start or now - timedelta(days=30)
+        finish = min(finish, now) if finish else now
         result = []
         for row in rows:
             fields = row["fields"]
@@ -246,10 +276,10 @@ class AdminWeb:
                     fields.get("Started Alone At" if solo else "Joined At")
                 )
                 left = fields.get("Ended Alone At" if solo else "Left At")
-                end = min(timestamp(left), now) if left else now
+                end = min(timestamp(left), finish) if left else finish
             except (TypeError, ValueError):
                 continue
-            if end < start or joined > now:
+            if end <= start or joined >= finish:
                 continue
             seconds = max(0, int((end - max(start, joined)).total_seconds()))
             result.append(
@@ -261,16 +291,18 @@ class AdminWeb:
                     "left": left,
                     "seconds": seconds,
                     "active": not bool(left),
+                    "quality": fields.get("Data Quality", "legacy / unknown"),
                 }
             )
         return sorted(result, key=lambda x: x["joined"], reverse=True)
 
     async def dashboard(self, request):
         guild = request["member"].guild
-        data = await self.snapshot(guild.id)
+        start, end = report_period(request.query)
+        data = await self.snapshot(guild.id, start, end)
         voice, solo = (
-            self.voice_data(data["voice"]),
-            self.voice_data(data["solo"], True),
+            self.voice_data(data["voice"], start=start, finish=end),
+            self.voice_data(data["solo"], True, start, end),
         )
         totals = defaultdict(
             lambda: {"name": "", "seconds": 0, "solo_seconds": 0, "sessions": 0}
@@ -278,19 +310,25 @@ class AdminWeb:
         for rows, key in ((voice, "seconds"), (solo, "solo_seconds")):
             for row in rows:
                 person = totals[row["user_id"]]
+                person["user_id"] = row["user_id"]
                 person["name"] = row["name"]
                 person[key] += row["seconds"]
                 if key == "seconds":
                     person["sessions"] += 1
         live = []
         for channel in guild.voice_channels + guild.stage_channels:
-            people = [m.display_name for m in channel.members if not m.bot]
+            humans = [m for m in channel.members if not m.bot]
+            people = [
+                m.display_name
+                for m in humans
+                if not self.community or self.community.tracking(guild.id, m.id)
+            ]
             if people:
                 live.append(
                     {
                         "channel": channel.name,
                         "people": people,
-                        "solo": len(people) == 1,
+                        "solo": len(humans) == 1,
                     }
                 )
         polls = sorted(
@@ -301,10 +339,14 @@ class AdminWeb:
         events = [
             e for e in self.events.events.values() if e["guild_id"] == str(guild.id)
         ]
-        responses = [dict(id=r["id"], **r["fields"]) for r in data["responses"]]
+        responses = [self.response_fields(r) for r in data["responses"]]
         return web.json_response(
             {
                 "fetched_at": data["fetched_at"],
+                "period": {
+                    "from": start.date().isoformat(),
+                    "to": (end - timedelta(days=1)).date().isoformat(),
+                },
                 "now": utcnow().isoformat(),
                 "settings": self.get_settings(),
                 "stats": {
@@ -325,7 +367,8 @@ class AdminWeb:
                 "health": {
                     "discord": self.bot.is_ready(),
                     "event_scheduler": self.events.ready,
-                    "error": self.events.last_error
+                    "error": (self.community.error if self.community else None)
+                    or self.events.last_error
                     or (
                         self.yearly_summary.last_error if self.yearly_summary else None
                     ),
@@ -335,14 +378,15 @@ class AdminWeb:
         )
 
     async def export(self, request):
-        data = await self.snapshot(request["member"].guild.id)
+        start, end = report_period(request.query)
+        data = await self.snapshot(request["member"].guild.id, start, end)
         kind = request.query.get("kind", "voice")
         if kind not in {"voice", "solo", "responses"}:
             raise ValueError("Choose voice, solo, or responses.")
         rows = (
-            self.voice_data(data[kind], kind == "solo")
+            self.voice_data(data[kind], kind == "solo", start, end)
             if kind != "responses"
-            else [r["fields"] for r in data["responses"]]
+            else [self.response_fields(r) for r in data["responses"]]
         )
         output = io.StringIO()
         if rows:
@@ -364,7 +408,7 @@ class AdminWeb:
             text=output.getvalue(),
             content_type="text/csv",
             headers={
-                "Content-Disposition": f'attachment; filename="teemo-{kind}-30days.csv"'
+                "Content-Disposition": f'attachment; filename="teemo-{kind}-{start.date()}-to-{(end - timedelta(days=1)).date()}.csv"'
             },
         )
 
@@ -379,8 +423,208 @@ class AdminWeb:
             raise ValueError("Unknown daily task.")
         async with self.action_lock:
             result = await self.daily_action(action, request["member"])
-            self.cache.pop(request["member"].guild.id, None)
+            self.cache.clear()
         return web.json_response({"message": result})
+
+    async def member_detail(self, request):
+        user_id = request.match_info["user_id"]
+        if not user_id.isdecimal():
+            raise ValueError("Choose a member.")
+        start, end = report_period(request.query)
+        data = await self.snapshot(request["member"].guild.id, start, end)
+        result = {"user_id": user_id, "voice": [], "solo": [], "responses": []}
+        for kind in ("voice", "solo"):
+            result[kind] = [
+                r
+                for r in self.voice_data(data[kind], kind == "solo", start, end)
+                if str(r["user_id"]) == user_id
+            ]
+        result["responses"] = [
+            self.response_fields(r)
+            for r in data["responses"]
+            if r["fields"].get("User ID") == user_id
+        ]
+        return web.json_response(result)
+
+    def response_fields(self, row):
+        fields = dict(id=row["id"], **row["fields"])
+        if self.community:
+            plan = self.community.get(
+                f"plan:{fields.get('Poll Key')}:{fields.get('User ID')}"
+            )
+            if (
+                plan
+                and plan.get("confirmed")
+                and fields.get("Choice") == "yes"
+                and plan.get("from") == fields.get("Play Time")
+            ):
+                fields["Games"] = ", ".join(plan["games"])
+                fields["Available Until"] = plan["until"]
+        return fields
+
+    def require_community(self):
+        if not self.community or not self.community.ready:
+            raise web.HTTPServiceUnavailable(
+                reason="Community tools are loading. Please try again shortly."
+            )
+
+    async def task_history(self, request):
+        self.require_community()
+        guild_id = request["member"].guild.id
+        tasks = self.community.items(guild_id, "task")
+        now = utcnow().astimezone(BANGKOK)
+        settings = self.get_settings()
+        for action in ("poll", "report"):
+            if settings.get(action + "_enabled", True):
+                due = datetime.combine(
+                    now.date(),
+                    clock_time.fromisoformat(settings[action + "_time"]),
+                    BANGKOK,
+                )
+                if due <= now:
+                    due += timedelta(days=1)
+                tasks.append(
+                    {
+                        "key": "next:" + action,
+                        "action": "Next daily " + action,
+                        "status": "scheduled",
+                        "expected_at": due.isoformat(),
+                    }
+                )
+        for e in self.events.events.values():
+            if e["guild_id"] == str(guild_id):
+                tasks.append(
+                    {
+                        "key": e["key"],
+                        "action": e["kind"] + ": " + e["title"],
+                        "status": e["status"],
+                        "expected_at": e.get("publish_at"),
+                        "attempted_at": e.get("published_at"),
+                        "completed_at": e.get("published_at"),
+                        "message_id": e.get("message_id"),
+                        "channel_id": e["channel_id"],
+                        "error": e.get("error"),
+                        "history": e.get("history", []),
+                    }
+                )
+        return web.json_response(
+            {
+                "tasks": sorted(
+                    tasks,
+                    key=lambda t: (
+                        t.get("attempted_at")
+                        or t.get("expected_at")
+                        or t.get("updated_at", "")
+                    ),
+                    reverse=True,
+                )[:500]
+            }
+        )
+
+    async def report_action(self, request):
+        self.require_community()
+        member = request["member"]
+        return web.json_response(
+            await self.community.report_action(
+                member.guild.id, member.id, await request.json()
+            )
+        )
+
+    async def task_recover(self, request):
+        self.require_community()
+        return web.json_response(
+            {
+                "task": await self.community.recover_task(
+                    request["member"].guild.id, (await request.json())["key"]
+                )
+            }
+        )
+
+    async def templates_list(self, request):
+        self.require_community()
+        return web.json_response(
+            {"templates": self.community.items(request["member"].guild.id, "template")}
+        )
+
+    async def template_create(self, request):
+        self.require_community()
+        self.require_events()
+        member = request["member"]
+        return web.json_response(
+            {
+                "template": await self.community.create_template(
+                    member.guild.id, member.id, await request.json()
+                )
+            }
+        )
+
+    async def template_action(self, request):
+        self.require_community()
+        self.require_events()
+        member = request["member"]
+        return web.json_response(
+            await self.community.template_action(
+                member.guild.id,
+                request.match_info["key"],
+                request.match_info["action"],
+                await request.json(),
+                member.id,
+            )
+        )
+
+    async def community_info(self, request):
+        self.require_community()
+        guild_id = request["member"].guild.id
+        return web.json_response(
+            {
+                "config": self.community.config(guild_id),
+                "backups": await asyncio.to_thread(self.backups.list, guild_id)
+                if self.backups
+                else [],
+            }
+        )
+
+    async def community_config(self, request):
+        self.require_community()
+        guild_id = request["member"].guild.id
+        data = await request.json()
+        if any(type(data.get(k)) is not bool for k in ("public_reasons", "backups")):
+            raise ValueError("Choose privacy and backup settings.")
+        result = await self.community.put(
+            f"config:{guild_id}",
+            guild_id,
+            "config",
+            {k: data[k] for k in ("public_reasons", "backups")},
+        )
+        return web.json_response({"config": result})
+
+    async def backup_create(self, request):
+        self.require_community()
+        return web.json_response(await self.backups.create(request["member"].guild.id))
+
+    async def backup_download(self, request):
+        self.require_community()
+        data = await asyncio.to_thread(
+            self.backups.read, request["member"].guild.id, request.match_info["key"]
+        )
+        return web.json_response(
+            data,
+            headers={
+                "Content-Disposition": 'attachment; filename="teemo-private-backup.json"'
+            },
+        )
+
+    async def backup_restore(self, request):
+        self.require_community()
+        data = await request.json()
+        preview = data.get("preview") is True
+        if not preview and data.get("confirmed") is not True:
+            raise ValueError("Preview and confirm the restore first.")
+        result = await self.backups.restore(
+            request["member"].guild.id, request.match_info["key"], preview=preview
+        )
+        self.cache.clear()
+        return web.json_response(result)
 
     def require_events(self):
         if not self.events.ready:
@@ -437,6 +681,15 @@ class AdminWeb:
             await asyncio.sleep(15)
             self.prune()
             if self.bot.is_ready():
+                if self.community:
+                    try:
+                        await self.community.tick()
+                        if self.backups:
+                            await self.backups.tick()
+                        self.community.error = None
+                    except Exception:
+                        LOGGER.exception("Community worker failed")
+                        self.community.error = "Community task failed. Check storage, task history and backup settings."
                 try:
                     if not self.events.ready:
                         await self.events.restore()

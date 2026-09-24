@@ -149,9 +149,7 @@ class AirtablePollStore:
     async def healthcheck(self) -> None:
         await self._request("GET", POLLS_TABLE, params={"maxRecords": 1})
         await self._request("GET", VOICE_SESSIONS_TABLE, params={"maxRecords": 1})
-        await self._request(
-            "GET", SOLO_VOICE_SESSIONS_TABLE, params={"maxRecords": 1}
-        )
+        await self._request("GET", SOLO_VOICE_SESSIONS_TABLE, params={"maxRecords": 1})
         await self._request("GET", BOT_SETTINGS_TABLE, params={"maxRecords": 1})
 
     async def get_bot_settings(self) -> dict[str, Any] | None:
@@ -164,9 +162,7 @@ class AirtablePollStore:
         raw_channel_ids = str(fields.get("Poll Channel IDs") or "")
         try:
             poll_channel_ids = [
-                int(item.strip())
-                for item in raw_channel_ids.split(",")
-                if item.strip()
+                int(item.strip()) for item in raw_channel_ids.split(",") if item.strip()
             ]
             announcement_channel_id = (
                 int(fields["Announcement Channel ID"])
@@ -217,9 +213,7 @@ class AirtablePollStore:
                 fields["Poll Enabled"] = "yes" if poll_enabled else "no"
             if report_enabled is not None:
                 fields["Report Enabled"] = "yes" if report_enabled else "no"
-            existing = await self._find_one(
-                BOT_SETTINGS_TABLE, "Setting Key", "global"
-            )
+            existing = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", "global")
             if existing:
                 await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
             else:
@@ -313,6 +307,7 @@ class AirtablePollStore:
                     "Voice Channel ID": str(voice_channel_id),
                     "Voice Channel Name": voice_channel_name[:100],
                     "Joined At": joined_at.isoformat(),
+                    "Data Quality": "recorded",
                     "Left At": "",
                     "Duration Seconds": 0,
                     "Session Date": session_date.isoformat(),
@@ -372,6 +367,11 @@ class AirtablePollStore:
         async with self._voice_session_lock:
             for record in await self._get_active_voice_sessions():
                 fields = record.get("fields") or {}
+                await self._update(
+                    VOICE_SESSIONS_TABLE,
+                    record["id"],
+                    {"Data Quality": "estimated: spans bot downtime"},
+                )
                 active_key = fields.get("Active Key")
                 member = current.get(active_key)
                 same_channel = member and fields.get("Voice Channel ID") == str(
@@ -400,6 +400,7 @@ class AirtablePollStore:
                         "Voice Channel ID": str(member["voice_channel_id"]),
                         "Voice Channel Name": str(member["voice_channel_name"])[:100],
                         "Joined At": reconciled_at.isoformat(),
+                        "Data Quality": "estimated: joined during bot downtime",
                         "Left At": "",
                         "Duration Seconds": 0,
                         "Session Date": str(member["session_date"]),
@@ -428,9 +429,7 @@ class AirtablePollStore:
                 started_at = started_at.replace(tzinfo=timezone.utc)
             duration_seconds = max(
                 0,
-                int(
-                    (ended_at - started_at.astimezone(timezone.utc)).total_seconds()
-                ),
+                int((ended_at - started_at.astimezone(timezone.utc)).total_seconds()),
             )
         except (TypeError, ValueError):
             duration_seconds = 0
@@ -490,6 +489,7 @@ class AirtablePollStore:
                     "Voice Channel ID": str(voice_channel_id),
                     "Voice Channel Name": voice_channel_name[:100],
                     "Started Alone At": changed_at.isoformat(),
+                    "Data Quality": "recorded",
                     "Ended Alone At": "",
                     "Duration Seconds": 0,
                     "Session Date": session_date.isoformat(),
@@ -523,7 +523,9 @@ class AirtablePollStore:
         """Make active solo periods match Discord after a bot restart."""
         reconciled_at = self._utc_timestamp(reconciled_at)
         current = {
-            self._solo_voice_active_key(item["guild_id"], item["voice_channel_id"]): item
+            self._solo_voice_active_key(
+                item["guild_id"], item["voice_channel_id"]
+            ): item
             for item in solo_channels
         }
         started = 0
@@ -533,11 +535,14 @@ class AirtablePollStore:
         async with self._solo_voice_session_lock:
             for record in await self._get_active_solo_voice_sessions():
                 fields = record.get("fields") or {}
+                await self._update(
+                    SOLO_VOICE_SESSIONS_TABLE,
+                    record["id"],
+                    {"Data Quality": "estimated: spans bot downtime"},
+                )
                 active_key = fields.get("Active Key")
                 member = current.get(active_key)
-                same_member = member and fields.get("User ID") == str(
-                    member["user_id"]
-                )
+                same_member = member and fields.get("User ID") == str(member["user_id"])
                 if same_member and active_key not in retained:
                     retained.add(active_key)
                     continue
@@ -561,6 +566,7 @@ class AirtablePollStore:
                         "Voice Channel ID": str(member["voice_channel_id"]),
                         "Voice Channel Name": str(member["voice_channel_name"])[:100],
                         "Started Alone At": reconciled_at.isoformat(),
+                        "Data Quality": "estimated: alone during bot downtime",
                         "Ended Alone At": "",
                         "Duration Seconds": 0,
                         "Session Date": str(member["session_date"]),

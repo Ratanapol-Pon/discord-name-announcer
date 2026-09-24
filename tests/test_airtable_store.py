@@ -261,6 +261,7 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         self.store._update.assert_not_awaited()
 
     async def test_voice_session_reconciliation_closes_stale_and_starts_missing(self):
+        self.store._update = AsyncMock()
         self.store._get_active_voice_sessions = AsyncMock(
             return_value=[
                 {
@@ -307,6 +308,8 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         created_fields = self.store._create.await_args.args[1]
         self.assertEqual("99:3", created_fields["Active Key"])
         self.assertEqual("888", created_fields["Voice Channel ID"])
+        self.assertIn("estimated", created_fields["Data Quality"])
+        self.assertEqual(2, self.store._update.await_count)
 
     async def test_solo_period_records_start_end_and_duration(self):
         started_at = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)

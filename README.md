@@ -36,7 +36,77 @@ It also runs a daily game poll (times and channels can be changed from
 - A restart between 11:59 and 17:00 catches up a missing poll; a restart after
   17:00 retries a missing report for an existing poll.
 
-## How it works
+## Community planning and admin tools
+
+- **Yes → start time → games → available until → Save Yes + plan.** Choose up to
+  four games or Any game. Flexible means 18:00 onwards; windows end the same
+  evening. The summary suggests the game and earliest half-hour start with the
+  largest overlap of at least 30 minutes and two members. This is a suggestion,
+  not a booking. Legacy Yes votes without availability are not guessed.
+- **Date ranges:** Today, this week (Monday onwards), this month, last 30 calendar
+  days, this year, and custom ranges of up to 367 days. All boundaries are Bangkok
+  midnight. The end date is inclusive; ongoing sessions stop at the current time.
+  Exports follow the selected dates. Click a member under Voice activity for the
+  full session, solo-period and answer history in that range.
+- **Task history:** expected, attempted and completed timestamps, status, and
+  Discord links. Logging of daily tasks starts with this upgrade. Existing event
+  publications are also listed. Uncertain delivery is never automatically resent;
+  Check delivery searches the latest 100 destination messages for its unique marker.
+- **Summary controls:** Polls & posts → Responses → Preview summary. Update
+  original edits the saved message; Resend creates a new copy and preserves the
+  original. Both require confirmation and an idempotent operation ID. Saved votes
+  are unchanged. A fresh preview starts a new operation. Previews are text-only,
+  not an exact rendering of every Discord client.
+- **Reminders:** opt in on the game plan; Teemo sends one DM 15 minutes before the
+  suggested group start, only to opted-in members included in that overlap. Global
+  opt-out and quiet hours take priority (default 23:00–09:00 Bangkok). No reminders
+  are sent after the start time, and blocked DMs never fall back to public pings.
+  Late recovery within the 15-minute window can send the reminder late.
+- **Recurring templates:** select an existing event poll/news/announcement as the
+  source, choose daily/weekly/fortnightly publication and relative closing/event
+  times. Templates save paused; an admin must explicitly enable automatic posts.
+  Pause or create a one-off draft at any time. Occurrences more than 15 minutes
+  late are skipped, not posted in a burst. Uncertain delivery pauses the template.
+- **Member privacy:** `/teemo_preferences` is available privately to all server
+  members. It controls future voice/solo/attendance recording, public yearly voice
+  totals, DM reminders and quiet hours. Equal quiet-hour start/end disables quiet
+  hours. Existing records remain; this is not a deletion request. Poll answers
+  remain stored. Paused members are omitted from the live dashboard names but still
+  count as physically present when determining whether another member is alone.
+  Admins can hide No reasons in future daily summaries under Privacy & backups;
+  the existing default (public reasons) is preserved. Existing posts are unchanged.
+- **Data quality:** new live sessions are marked recorded; sessions spanning bot
+  downtime or first detected on reconnect are estimated. Older rows with no
+  quality metadata show legacy / unknown. Voice time is presence, not speech.
+- **Backups:** daily compressed JSON snapshots of the guild's poll, response,
+  report, voice, solo, event, event-vote and community-state records. Snapshots are
+  best-effort, not transactional. The newest 14 per guild are retained on the
+  existing volume; admin-only JSON download and manual backup are provided.
+  Credentials and audio clips are excluded. This is not an off-site disaster
+  recovery service—download independent copies yourself. No additional paid backup
+  service is configured. More data means more Airtable records/API requests and
+  volume usage; existing provider limits still apply.
+- **Restore:** preview the missing-record count, then confirm. Only missing
+  historical polls, responses, reports and voice/solo sessions are added; existing
+  rows are not overwritten. Poll IDs and dependent response/report keys are remapped.
+  Restored polls stay closed without reconnecting old buttons. Active sessions are
+  closed at backup time and marked estimated. Current open polls are excluded from
+  restoring answers. Settings, plans, preferences, templates and events are included
+  for reference in downloads but are **not automatically restored or reactivated**.
+  Restore can be safely rerun after interruption; it skips keys already present.
+
+Schema additions required before deploying this upgrade:
+
+- `Teemo State`: `Key` (primary single-line text), `Guild ID`, `Kind`, `Updated At`
+  (single-line text), `Data` (long text JSON).
+- `Voice Sessions` and `Solo Voice Sessions`: `Data Quality` (single-line text).
+- Optional `BACKUP_DIR`: defaults to a `backups` sibling of `CLIP_DIR`. With
+  `CLIP_DIR=/data/clips`, snapshots use `/data/backups` on the existing volume.
+
+Run offline checks with `python -m unittest discover -s tests` and
+`node --test tests/*.test.cjs`. Keep one running bot replica.
+
+## Name announcements
 
 - Watches **all** voice channels in the server.
 - Announces only when **≥ 1 other human** is already in the channel.
@@ -162,8 +232,9 @@ every request. `/teemo_admin` now opens the same web console.
 The UI uses Bangkok time. Attendance remains private; Discord's daily summary
 contains votes, play times and reasons only. Voice tracking measures presence,
 not speaking. Bot downtime can make session end times approximate. The dashboard
-shows 30 days and up to 250 recent sessions; CSV includes all sessions in that
-period. Historical Airtable records are retained. History refreshes every minute
+defaults to 30 days and shows up to 250 recent sessions; the date filter changes
+the period and CSV includes all sessions in it. Member details include all of
+that member's sessions in the selected period. Historical Airtable records are retained. History refreshes every minute
 while viewing; forms are not refreshed underneath your edits.
 
 Use **one running replica**. Event schedules and votes survive restarts in
