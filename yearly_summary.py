@@ -126,9 +126,20 @@ class YearlySummary:
         now = now or datetime.now(self.timezone)
         if not self.is_due(now) or not self.events.ready:
             return None
-        channel_id = self.get_channel_id()
-        if not channel_id:
+        channel_ids = self.get_channel_id()
+        if not channel_ids:
             return None
+        # Single-channel callables (legacy/tests) keep the single-result contract;
+        # multi-server deployments pass a list with one channel per guild.
+        single = isinstance(channel_ids, (int, str))
+        if single:
+            channel_ids = [channel_ids]
+        results = []
+        for channel_id in channel_ids:
+            results.append(await self._run_for_channel(int(channel_id), now))
+        return results[0] if single else [r for r in results if r]
+
+    async def _run_for_channel(self, channel_id: int, now):
         year = now.astimezone(self.timezone).year
         channel = self.events.bot.get_channel(int(channel_id))
         if channel is None:

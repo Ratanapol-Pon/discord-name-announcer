@@ -189,7 +189,7 @@ class Community:
                 self.enrich(poll, report),
                 timestamp(report["generated_at"]).astimezone(BANGKOK).strftime("%H:%M")
                 if report.get("generated_at")
-                else self.polls.report_time,
+                else self.polls.settings_for(int(guild_id)).report_time,
             )
             if action == "preview":
                 return {"embed": embed.to_dict()}
@@ -287,8 +287,6 @@ class Community:
             )
 
     async def reminder_tick(self, now):
-        if now.strftime("%H:%M") < self.polls.report_time:
-            return
         fetched = set()
         self.reminder_reports = {
             k: v
@@ -302,6 +300,10 @@ class Community:
                 or not plan.get("reminder")
                 or plan.get("poll_date") != now.date().isoformat()
             ):
+                continue
+            if now.strftime("%H:%M") < self.polls.settings_for(
+                int(plan["guild_id"])
+            ).report_time:
                 continue
             prefs = self.preferences(plan["guild_id"], plan["user_id"])
             if not prefs.get("reminders", False):

@@ -96,7 +96,7 @@ def fixture():
         bot,
         store,
         manager,
-        lambda: settings,
+        lambda guild_id: settings,
         AsyncMock(),
         AsyncMock(return_value="Done"),
         "http://127.0.0.1",

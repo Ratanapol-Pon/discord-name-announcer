@@ -216,7 +216,7 @@ class AdminWeb:
                 "guild": guild.name,
                 "guild_id": str(guild.id),
                 "channels": channels,
-                "settings": self.get_settings(),
+                "settings": self.get_settings(guild.id),
                 "events_ready": self.events.ready,
             }
         )
@@ -348,7 +348,7 @@ class AdminWeb:
                     "to": (end - timedelta(days=1)).date().isoformat(),
                 },
                 "now": utcnow().isoformat(),
-                "settings": self.get_settings(),
+                "settings": self.get_settings(guild.id),
                 "stats": {
                     "voice_seconds": sum(x["seconds"] for x in voice),
                     "solo_seconds": sum(x["seconds"] for x in solo),
@@ -415,7 +415,9 @@ class AdminWeb:
     async def settings(self, request):
         async with self.action_lock:
             await self.save_settings(await request.json(), request["member"])
-        return web.json_response({"settings": self.get_settings()})
+        return web.json_response(
+            {"settings": self.get_settings(request["member"].guild.id)}
+        )
 
     async def daily(self, request):
         action = request.match_info["action"]
@@ -473,7 +475,7 @@ class AdminWeb:
         guild_id = request["member"].guild.id
         tasks = self.community.items(guild_id, "task")
         now = utcnow().astimezone(BANGKOK)
-        settings = self.get_settings()
+        settings = self.get_settings(guild_id)
         for action in ("poll", "report"):
             if settings.get(action + "_enabled", True):
                 due = datetime.combine(

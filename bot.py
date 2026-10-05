@@ -34,6 +34,7 @@ from airtable_store import AirtablePollStore
 from event_manager import EventManager
 from community import Community
 from backups import Backups
+from guild_config import GuildSettings, GuildSettingsRegistry
 from planning import minutes
 from game_poll import GamePollService, GamePollView
 from yearly_summary import YearlySummary
@@ -79,8 +80,6 @@ YEARLY_SUMMARY_CLOCK = _parse_clock(os.getenv("YEARLY_SUMMARY_TIME", "17:00"), "
 YEARLY_SUMMARY_ENABLED = os.getenv("YEARLY_SUMMARY_ENABLED", "true").lower() == "true"
 if REPORT_CLOCK <= POLL_CLOCK:
     raise SystemExit("REPORT_TIME must be later than POLL_TIME on the same day.")
-POLL_RUN_TIME = POLL_CLOCK.replace(tzinfo=BOT_TIMEZONE)
-REPORT_RUN_TIME = REPORT_CLOCK.replace(tzinfo=BOT_TIMEZONE)
 
 CLIP_DIR = os.getenv("CLIP_DIR", "clips")  # where name clips live
 COOLDOWN_SECONDS = 60  # anti-spam per member
@@ -115,11 +114,12 @@ last_announce: dict[int, float] = {}  # member_id -> unix time
 guild_locks: dict[int, asyncio.Lock] = {}  # one playback at a time per server
 game_poll_service: GamePollService | None = None
 poll_runtime_started = False
-active_poll_clock = POLL_CLOCK
-active_report_clock = REPORT_CLOCK
-announcement_channel_id: int | None = None
-poll_enabled = True
-report_enabled = True
+# Per-guild daily poll settings. Env POLL_TIME/REPORT_TIME are only the
+# defaults shown to new servers; env POLL_CHANNEL_ID(S) seed the original
+# server once. After setup everything lives per guild in Airtable.
+settings_registry = GuildSettingsRegistry(
+    f"{POLL_CLOCK:%H:%M}", f"{REPORT_CLOCK:%H:%M}"
+)
 web_admin: AdminWeb | None = None
 
 
@@ -131,10 +131,6 @@ def _poll_channel_ids() -> list[int]:
         raise SystemExit(
             "POLL_CHANNEL_ID(S) must contain Discord channel IDs only."
         ) from exc
-    if not channel_ids:
-        raise SystemExit(
-            "Missing POLL_CHANNEL_ID (or comma-separated POLL_CHANNEL_IDS)."
-        )
     return list(dict.fromkeys(channel_ids))
 
 
@@ -155,8 +151,10 @@ def configure_game_poll() -> None:
         store,
         _poll_channel_ids(),
         TIMEZONE_NAME,
-        f"{active_report_clock:%H:%M}",
+        f"{REPORT_CLOCK:%H:%M}",
     )
+    game_poll_service.poll_time = f"{POLL_CLOCK:%H:%M}"
+    game_poll_service.settings_provider = settings_registry
     bot.add_view(GamePollView(game_poll_service))
 
 
@@ -184,70 +182,109 @@ async def _get_guild_message_channel(
     return channel
 
 
-def _apply_runtime_settings(
-    poll_clock: clock_time,
-    report_clock: clock_time,
-    poll_channel_ids: list[int],
-    post_channel_id: int | None,
-) -> None:
-    """Apply validated settings without restarting Teemo."""
-    global active_poll_clock, active_report_clock, announcement_channel_id
-
+def _validate_guild_settings(settings: GuildSettings) -> None:
+    poll_clock = _clock_from_text(settings.poll_time)
+    report_clock = _clock_from_text(settings.report_time)
     if report_clock <= poll_clock:
-        raise ValueError("Report time must be later than poll time on the same day.")
-    if not poll_channel_ids:
-        raise ValueError("At least one poll channel is required.")
+        raise ValueError("Summary time must be later than poll time.")
 
-    active_poll_clock = poll_clock
-    active_report_clock = report_clock
-    announcement_channel_id = post_channel_id
-    if game_poll_service:
-        game_poll_service.channel_ids = list(dict.fromkeys(poll_channel_ids))
-        game_poll_service.report_time = f"{report_clock:%H:%M}"
-        game_poll_service.poll_time = f"{poll_clock:%H:%M}"
 
-    daily_game_poll.change_interval(time=poll_clock.replace(tzinfo=BOT_TIMEZONE))
-    daily_game_poll_report.change_interval(
-        time=report_clock.replace(tzinfo=BOT_TIMEZONE)
+async def _save_guild_settings(settings: GuildSettings, updated_by: str) -> None:
+    """Validate, persist and activate one server's settings without restart."""
+    _validate_guild_settings(settings)
+    await game_poll_service.store.save_bot_settings(
+        poll_time=settings.poll_time,
+        report_time=settings.report_time,
+        poll_channel_ids=settings.poll_channel_ids,
+        announcement_channel_id=settings.announcement_channel_id,
+        updated_by=updated_by,
+        poll_enabled=settings.poll_enabled,
+        report_enabled=settings.report_enabled,
+        setting_key=str(settings.guild_id),
     )
+    settings_registry.put(settings)
 
 
-async def _load_runtime_settings() -> None:
-    global poll_enabled, report_enabled
+async def _guild_for_channels(channel_ids: list[int]) -> int | None:
+    """Resolve which server owns these channels (for seeding/migration)."""
+    for channel_id in channel_ids:
+        try:
+            channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        except (discord.HTTPException, ValueError):
+            continue
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            return guild.id
+    return None
+
+
+async def _load_guild_settings() -> None:
+    """Load every server's settings, migrating the legacy 'global' record.
+
+    Migration copies the single-server record to the guild that owns its
+    channels (once, idempotently) and never deletes the legacy row.
+    """
     if not game_poll_service:
         return
-    settings = await game_poll_service.store.get_bot_settings()
-    if not settings:
-        return
+    records = await game_poll_service.store.list_bot_settings()
+    legacy = records.pop("global", None)
+    for key, data in records.items():
+        try:
+            guild_id = int(key)
+        except (TypeError, ValueError):
+            LOGGER.warning("Ignoring Bot Settings record with key %r", key)
+            continue
+        settings_registry.put(
+            GuildSettings(
+                guild_id,
+                poll_time=data.get("poll_time") or f"{POLL_CLOCK:%H:%M}",
+                report_time=data.get("report_time") or f"{REPORT_CLOCK:%H:%M}",
+                poll_channel_ids=data.get("poll_channel_ids") or [],
+                announcement_channel_id=data.get("announcement_channel_id"),
+                poll_enabled=data.get("poll_enabled", True),
+                report_enabled=data.get("report_enabled", True),
+            )
+        )
+    legacy_candidates = [
+        (legacy, "one-time migration"),
+        (
+            {
+                "poll_time": f"{POLL_CLOCK:%H:%M}",
+                "report_time": f"{REPORT_CLOCK:%H:%M}",
+                "poll_channel_ids": _poll_channel_ids(),
+                "announcement_channel_id": None,
+            },
+            "environment seeding",
+        ),
+    ]
+    for data, source in legacy_candidates:
+        if not data or not data.get("poll_channel_ids"):
+            continue
+        guild_id = await _guild_for_channels(data["poll_channel_ids"])
+        if guild_id is None or settings_registry.for_guild(guild_id) is not None:
+            continue
+        await _save_guild_settings(
+            GuildSettings(
+                guild_id,
+                poll_time=data.get("poll_time") or f"{POLL_CLOCK:%H:%M}",
+                report_time=data.get("report_time") or f"{REPORT_CLOCK:%H:%M}",
+                poll_channel_ids=data["poll_channel_ids"],
+                announcement_channel_id=data.get("announcement_channel_id"),
+                poll_enabled=data.get("poll_enabled", True),
+                report_enabled=data.get("report_enabled", True),
+            ),
+            f"Teemo startup ({source})",
+        )
+        LOGGER.info("Seeded settings for guild %s via %s", guild_id, source)
 
-    poll_clock = _clock_from_text(
-        settings.get("poll_time") or f"{active_poll_clock:%H:%M}"
-    )
-    report_clock = _clock_from_text(
-        settings.get("report_time") or f"{active_report_clock:%H:%M}"
-    )
-    channel_ids = settings.get("poll_channel_ids") or game_poll_service.channel_ids
-    _apply_runtime_settings(
-        poll_clock,
-        report_clock,
-        channel_ids,
-        settings.get("announcement_channel_id"),
-    )
-    poll_enabled = settings.get("poll_enabled", True)
-    report_enabled = settings.get("report_enabled", True)
 
-
-def _web_settings():
-    return {"poll_time": f"{active_poll_clock:%H:%M}",
-            "report_time": f"{active_report_clock:%H:%M}",
-            "poll_channel_ids": [str(x) for x in game_poll_service.channel_ids],
-            "announcement_channel_id": str(announcement_channel_id or game_poll_service.channel_ids[0]),
-            "poll_enabled": poll_enabled, "report_enabled": report_enabled,
-            "timezone": TIMEZONE_NAME}
+def _web_settings(guild_id: int):
+    return settings_registry.get_or_default(guild_id).as_web_dict(TIMEZONE_NAME)
 
 
 async def _web_save_settings(data, member):
-    global poll_enabled, report_enabled
+    guild_id = member.guild.id
+    current = settings_registry.get_or_default(guild_id)
     poll_clock = _clock_from_text(data.get("poll_time", ""))
     report_clock = _clock_from_text(data.get("report_time", ""))
     if report_clock <= poll_clock:
@@ -256,30 +293,39 @@ async def _web_save_settings(data, member):
     if not isinstance(ids, list) or not 1 <= len(ids) <= 10:
         raise ValueError("Choose 1–10 daily poll channels.")
     ids = list(dict.fromkeys(int(x) for x in ids))
-    post_id = int(data.get("announcement_channel_id", "0"))
+    post_id = int(data.get("announcement_channel_id") or 0) or None
     for flag in ("poll_enabled", "report_enabled"):
         if not isinstance(data.get(flag), bool):
             raise TypeError("Task switches must be on or off.")
-    for channel_id in set(ids + [post_id] + game_poll_service.channel_ids):
-        await web_admin.events.channel({"channel_id": str(channel_id), "guild_id": str(member.guild.id)})
+    for channel_id in set(ids + [post_id or 0] + current.poll_channel_ids):
+        if channel_id:
+            await web_admin.events.channel({"channel_id": str(channel_id), "guild_id": str(guild_id)})
     today = datetime.now(BOT_TIMEZONE).date()
-    for removed in set(game_poll_service.channel_ids) - set(ids):
+    for removed in set(current.poll_channel_ids) - set(ids):
         poll = await game_poll_service.store.get_poll(removed, today)
         if poll and poll["status"] == "open":
             raise ValueError("Close today's poll with Run summary before removing its channel.")
-    await game_poll_service.store.save_bot_settings(
-        poll_time=f"{poll_clock:%H:%M}", report_time=f"{report_clock:%H:%M}",
-        poll_channel_ids=ids, announcement_channel_id=post_id,
-        updated_by=f"{member} ({member.id})", poll_enabled=data["poll_enabled"], report_enabled=data["report_enabled"],
+    await _save_guild_settings(
+        GuildSettings(
+            guild_id,
+            poll_time=f"{poll_clock:%H:%M}",
+            report_time=f"{report_clock:%H:%M}",
+            poll_channel_ids=ids,
+            announcement_channel_id=post_id,
+            poll_enabled=data["poll_enabled"],
+            report_enabled=data["report_enabled"],
+        ),
+        f"{member} ({member.id})",
     )
-    _apply_runtime_settings(poll_clock, report_clock, ids, post_id)
-    poll_enabled, report_enabled = data["poll_enabled"], data["report_enabled"]
     # Explicit Run now controls handle past times; saving does not unexpectedly post.
 
 
 async def _web_daily_action(action, member):
+    settings = settings_registry.for_guild(member.guild.id)
+    if not settings or not settings.poll_channel_ids:
+        return "This server has no daily poll channels yet. Save the daily schedule first."
     completed = 0
-    for channel_id in game_poll_service.channel_ids:
+    for channel_id in settings.poll_channel_ids:
         channel = await _get_guild_message_channel(channel_id, member.guild.id)
         method = game_poll_service.post_poll if action == "poll" else game_poll_service.generate_report
         completed += int(await method(channel.id, datetime.now(BOT_TIMEZONE).date()))
@@ -386,30 +432,40 @@ def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
 # ---------------------------------------------------------------- events
 
 
-@tasks.loop(time=POLL_RUN_TIME)
-async def daily_game_poll():
-    if game_poll_service and poll_enabled:
-        today = datetime.now(BOT_TIMEZONE).date()
-        await game_poll_service.post_daily_polls(today)
+@tasks.loop(minutes=1)
+async def daily_scheduler():
+    """Per-guild daily poll/report schedule; also covers restart catch-up."""
+    await run_due_daily_tasks(datetime.now(BOT_TIMEZONE))
 
 
-@tasks.loop(time=REPORT_RUN_TIME)
-async def daily_game_poll_report():
-    if game_poll_service and report_enabled:
-        today = datetime.now(BOT_TIMEZONE).date()
-        await game_poll_service.generate_daily_reports(today)
+async def run_due_daily_tasks(now: datetime) -> None:
+    """Post due polls and reports for every configured server.
 
-
-async def _catch_up_game_poll_schedule() -> None:
-    """Recover today's poll/report when the bot restarts after a scheduled time."""
+    Polls are posted only between the server's poll and report times;
+    reports run at/after the report time. Posting is idempotent, so a
+    restart inside a window catches up exactly once and never bursts.
+    """
     if not game_poll_service:
         return
-    now = datetime.now(BOT_TIMEZONE)
-    local_clock = now.time().replace(tzinfo=None)
-    if poll_enabled and active_poll_clock <= local_clock < active_report_clock:
-        await game_poll_service.post_daily_polls(now.date())
-    elif report_enabled and local_clock >= active_report_clock:
-        await game_poll_service.generate_daily_reports(now.date())
+    today = now.date()
+    local_time = now.strftime("%H:%M")
+    for settings in settings_registry.configured():
+        try:
+            if (
+                settings.poll_enabled
+                and settings.poll_time <= local_time < settings.report_time
+            ):
+                await game_poll_service.post_daily_polls(
+                    today, guild_id=settings.guild_id
+                )
+            if settings.report_enabled and local_time >= settings.report_time:
+                await game_poll_service.generate_daily_reports(
+                    today, guild_id=settings.guild_id
+                )
+        except Exception:
+            LOGGER.exception(
+                "Daily schedule failed for Discord server %s", settings.guild_id
+            )
 
 
 @bot.event
@@ -430,7 +486,7 @@ async def on_ready():
             )
             return
         try:
-            await _load_runtime_settings()
+            await _load_guild_settings()
         except Exception:
             LOGGER.exception(
                 "Stored Teemo settings are invalid; using environment defaults."
@@ -465,12 +521,11 @@ async def on_ready():
             LOGGER.exception("Failed to reconcile active solo voice periods")
             solo_session_status = "solo-period reconciliation failed"
         poll_runtime_started = True
-        daily_game_poll.start()
-        daily_game_poll_report.start()
-        asyncio.create_task(_catch_up_game_poll_schedule())
+        daily_scheduler.start()
+        configured = settings_registry.configured()
         print(
-            f"✅ Daily game poll enabled at {active_poll_clock:%H:%M}; "
-            f"report at {active_report_clock:%H:%M} ({TIMEZONE_NAME}); "
+            f"✅ Daily game polls enabled for {len(configured)} server(s) "
+            f"({TIMEZONE_NAME}); "
             f"restored {restored_views} open poll view(s); "
             f"{voice_session_status}; {solo_session_status}"
         )
@@ -578,11 +633,10 @@ def _is_administrator(user: discord.abc.User) -> bool:
     return bool(getattr(permissions, "administrator", False))
 
 
-def _admin_panel_embed(current_channel_id: int) -> discord.Embed:
-    poll_channels = (
-        game_poll_service.channel_ids if game_poll_service else _poll_channel_ids()
-    )
-    post_channel_id = announcement_channel_id or current_channel_id
+def _admin_panel_embed(guild_id: int, current_channel_id: int) -> discord.Embed:
+    settings = settings_registry.get_or_default(guild_id)
+    poll_channels = settings.poll_channel_ids
+    post_channel_id = settings.announcement_channel_id or current_channel_id
     embed = discord.Embed(
         title="Teemo Admin Panel",
         description="Manage the daily game poll and publish server updates.",
@@ -591,8 +645,8 @@ def _admin_panel_embed(current_channel_id: int) -> discord.Embed:
     embed.add_field(
         name="Daily schedule",
         value=(
-            f"Poll: **{active_poll_clock:%H:%M}**\n"
-            f"Summary: **{active_report_clock:%H:%M}**\n"
+            f"Poll: **{settings.poll_time}**\n"
+            f"Summary: **{settings.report_time}**\n"
             f"Timezone: **{TIMEZONE_NAME}**"
         ),
         inline=True,
@@ -600,7 +654,14 @@ def _admin_panel_embed(current_channel_id: int) -> discord.Embed:
     embed.add_field(
         name="Channels",
         value=(
-            "Poll: " + ", ".join(f"<#{channel_id}>" for channel_id in poll_channels)
+            (
+                "Poll: "
+                + (
+                    ", ".join(f"<#{channel_id}>" for channel_id in poll_channels)
+                    if poll_channels
+                    else "not set up yet"
+                )
+            )
             + f"\nNews / announcements: <#{post_channel_id}>"
         ),
         inline=True,
@@ -614,29 +675,27 @@ class ScheduleModal(discord.ui.Modal, title="Adjust Teemo's daily tasks"):
         super().__init__()
         self.guild_id = guild_id
         self.admin_id = admin_id
-        poll_channels = (
-            game_poll_service.channel_ids if game_poll_service else _poll_channel_ids()
-        )
+        settings = settings_registry.get_or_default(guild_id)
         self.poll_time = discord.ui.TextInput(
             label="Daily poll time (HH:MM)",
-            default=f"{active_poll_clock:%H:%M}",
+            default=settings.poll_time,
             min_length=5,
             max_length=5,
         )
         self.report_time = discord.ui.TextInput(
             label="Daily summary time (HH:MM)",
-            default=f"{active_report_clock:%H:%M}",
+            default=settings.report_time,
             min_length=5,
             max_length=5,
         )
         self.poll_channels = discord.ui.TextInput(
             label="Poll channel ID(s), comma-separated",
-            default=",".join(str(value) for value in poll_channels),
+            default=",".join(str(value) for value in settings.poll_channel_ids),
             max_length=300,
         )
         self.post_channel = discord.ui.TextInput(
             label="News / announcement channel ID",
-            default=str(announcement_channel_id or current_channel_id),
+            default=str(settings.announcement_channel_id or current_channel_id),
             max_length=20,
         )
         self.add_item(self.poll_time)
@@ -672,17 +731,20 @@ class ScheduleModal(discord.ui.Modal, title="Adjust Teemo's daily tasks"):
             for channel_id in list(dict.fromkeys(channel_ids + [post_channel_id])):
                 await _get_guild_message_channel(channel_id, self.guild_id)
 
-            await game_poll_service.store.save_bot_settings(
-                poll_time=f"{poll_clock:%H:%M}",
-                report_time=f"{report_clock:%H:%M}",
-                poll_channel_ids=channel_ids,
-                announcement_channel_id=post_channel_id,
-                updated_by=f"{interaction.user} ({interaction.user.id})",
+            current = settings_registry.get_or_default(self.guild_id)
+            await _save_guild_settings(
+                GuildSettings(
+                    self.guild_id,
+                    poll_time=f"{poll_clock:%H:%M}",
+                    report_time=f"{report_clock:%H:%M}",
+                    poll_channel_ids=channel_ids,
+                    announcement_channel_id=post_channel_id,
+                    poll_enabled=current.poll_enabled,
+                    report_enabled=current.report_enabled,
+                ),
+                f"{interaction.user} ({interaction.user.id})",
             )
-            _apply_runtime_settings(
-                poll_clock, report_clock, channel_ids, post_channel_id
-            )
-            await _catch_up_game_poll_schedule()
+            await run_due_daily_tasks(datetime.now(BOT_TIMEZONE))
             await interaction.followup.send(
                 "Settings saved to Airtable and applied immediately.\n"
                 f"Poll: **{poll_clock:%H:%M}** • Summary: **{report_clock:%H:%M}**",
@@ -707,7 +769,8 @@ class PublishPostModal(discord.ui.Modal):
         self.kind = kind
         self.guild_id = guild_id
         self.admin_id = admin_id
-        self.target_channel_id = announcement_channel_id or fallback_channel_id
+        settings = settings_registry.get_or_default(guild_id)
+        self.target_channel_id = settings.announcement_channel_id or fallback_channel_id
         self.heading = discord.ui.TextInput(
             label=f"{kind.title()} title", max_length=200
         )
@@ -801,7 +864,7 @@ class AdminPanelView(discord.ui.View):
             )
             return
         created = await game_poll_service.post_daily_polls(
-            datetime.now(BOT_TIMEZONE).date()
+            datetime.now(BOT_TIMEZONE).date(), guild_id=self.guild_id
         )
         message = (
             f"Posted today's poll in **{created}** configured channel(s)."
@@ -824,7 +887,7 @@ class AdminPanelView(discord.ui.View):
             )
             return
         generated = await game_poll_service.generate_daily_reports(
-            datetime.now(BOT_TIMEZONE).date()
+            datetime.now(BOT_TIMEZONE).date(), guild_id=self.guild_id
         )
         message = (
             f"Posted today's summary in **{generated}** configured channel(s)."
@@ -1107,12 +1170,22 @@ async def teemo_preferences(interaction: discord.Interaction, tracking: bool | N
         await interaction.followup.send("Preferences could not be fully applied. Please retry; any saved opt-out remains in effect.", ephemeral=True)
 
 
+def _yearly_summary_channel_ids() -> list[int]:
+    """One announcement channel per configured server (empty before startup)."""
+    if not poll_runtime_started:
+        return []
+    return [
+        settings.announcement_channel_id or settings.poll_channel_ids[0]
+        for settings in settings_registry.configured()
+    ]
+
+
 async def main():
     global web_admin
     async with bot:
         configure_game_poll()
         if not game_poll_service:
-            LOGGER.warning("Web console requires Airtable and poll channel configuration; starting voice bot only")
+            LOGGER.warning("Web console requires Airtable configuration; starting voice bot only")
             await bot.start(TOKEN)
             return
         public_url = os.getenv("ADMIN_PUBLIC_URL", "").rstrip("/")
@@ -1126,7 +1199,7 @@ async def main():
         web_admin.backups = Backups(community, os.getenv("BACKUP_DIR", os.path.join(os.path.dirname(os.path.abspath(CLIP_DIR)), "backups")))
         web_admin.yearly_summary = YearlySummary(
             events, BOT_TIMEZONE, YEARLY_SUMMARY_CLOCK,
-            lambda: (announcement_channel_id or game_poll_service.channel_ids[0]) if poll_runtime_started else None,
+            _yearly_summary_channel_ids,
             enabled=YEARLY_SUMMARY_ENABLED,
         )
         web_admin.yearly_summary.member_visible = lambda guild_id, user_id: community.ready and community.preferences(guild_id, user_id).get("public_yearly", True)

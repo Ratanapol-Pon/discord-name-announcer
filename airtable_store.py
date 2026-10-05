@@ -152,13 +152,8 @@ class AirtablePollStore:
         await self._request("GET", SOLO_VOICE_SESSIONS_TABLE, params={"maxRecords": 1})
         await self._request("GET", BOT_SETTINGS_TABLE, params={"maxRecords": 1})
 
-    async def get_bot_settings(self) -> dict[str, Any] | None:
-        """Return the global Discord-admin settings record, if configured."""
-        record = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", "global")
-        if not record:
-            return None
-
-        fields = record.get("fields") or {}
+    @staticmethod
+    def _parse_bot_settings(fields: dict[str, Any]) -> dict[str, Any]:
         raw_channel_ids = str(fields.get("Poll Channel IDs") or "")
         try:
             poll_channel_ids = [
@@ -185,6 +180,31 @@ class AirtablePollStore:
             "report_enabled": fields.get("Report Enabled", "yes") != "no",
         }
 
+    async def get_bot_settings(
+        self, setting_key: str = "global"
+    ) -> dict[str, Any] | None:
+        """Return one Discord-admin settings record, if configured."""
+        record = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", setting_key)
+        if not record:
+            return None
+        return self._parse_bot_settings(record.get("fields") or {})
+
+    async def list_bot_settings(self) -> dict[str, dict[str, Any]]:
+        """Return every settings record keyed by Setting Key.
+
+        Teemo keeps one record per Discord server (key = guild ID). A legacy
+        ``global`` record from the single-server era may also be present and
+        is migrated by the bot, never deleted.
+        """
+        records = await self.list_records(BOT_SETTINGS_TABLE)
+        result = {}
+        for record in records:
+            fields = record.get("fields") or {}
+            key = fields.get("Setting Key")
+            if key:
+                result[str(key)] = self._parse_bot_settings(fields)
+        return result
+
     async def save_bot_settings(
         self,
         *,
@@ -195,10 +215,11 @@ class AirtablePollStore:
         updated_by: str,
         poll_enabled: bool | None = None,
         report_enabled: bool | None = None,
+        setting_key: str = "global",
     ) -> None:
-        """Upsert the global settings changed through Teemo's admin panel."""
+        """Upsert one server's settings changed through Teemo's admin panel."""
         fields = {
-            "Setting Key": "global",
+            "Setting Key": setting_key,
             "Poll Time": poll_time,
             "Report Time": report_time,
             "Poll Channel IDs": ",".join(str(value) for value in poll_channel_ids),
@@ -213,7 +234,7 @@ class AirtablePollStore:
                 fields["Poll Enabled"] = "yes" if poll_enabled else "no"
             if report_enabled is not None:
                 fields["Report Enabled"] = "yes" if report_enabled else "no"
-            existing = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", "global")
+            existing = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", setting_key)
             if existing:
                 await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
             else:

@@ -18,6 +18,7 @@ from airtable_store import (
     PollClosedError,
     PollNotFoundError,
 )
+from guild_config import GuildSettings
 from planning import GAMES, validate_plan
 
 LOGGER = logging.getLogger(__name__)
@@ -344,8 +345,39 @@ class GamePollService:
         self.report_time = report_time
         self.community = None
         self.poll_time = "11:59"
+        # Optional per-guild settings provider (GuildSettingsRegistry in bot.py).
+        # When set, it overrides the legacy single-server attributes above.
+        self.settings_provider = None
         self._poll_lifecycle_lock = asyncio.Lock()
         self._delivery_lock = asyncio.Lock()
+
+    def settings_for(self, guild_id: int) -> GuildSettings:
+        """Settings for one server; falls back to legacy constructor values."""
+        if self.settings_provider is not None:
+            settings = self.settings_provider.for_guild(guild_id)
+            if settings is not None:
+                return settings
+        return GuildSettings(
+            guild_id=int(guild_id),
+            poll_time=self.poll_time,
+            report_time=self.report_time,
+            poll_channel_ids=list(self.channel_ids),
+        )
+
+    def _configured_settings(self) -> list[GuildSettings]:
+        """Every server's settings, or one legacy pseudo-entry."""
+        if self.settings_provider is not None:
+            return self.settings_provider.configured()
+        if not self.channel_ids:
+            return []
+        return [
+            GuildSettings(
+                guild_id=0,
+                poll_time=self.poll_time,
+                report_time=self.report_time,
+                poll_channel_ids=list(self.channel_ids),
+            )
+        ]
 
     async def _get_channel(self, channel_id: int) -> discord.abc.Messageable:
         channel = self.bot.get_channel(channel_id)
@@ -359,19 +391,33 @@ class GamePollService:
             )
         return channel
 
-    async def post_daily_polls(self, poll_date: date) -> int:
+    async def post_daily_polls(
+        self, poll_date: date, guild_id: int | None = None
+    ) -> int:
         created = 0
-        for channel_id in self.channel_ids:
-            try:
-                created += int(await self.post_poll(channel_id, poll_date))
-            except Exception:
-                LOGGER.exception("Failed to post game poll in channel %s", channel_id)
+        for settings in self._configured_settings():
+            if guild_id is not None and settings.guild_id != int(guild_id):
+                continue
+            if not settings.poll_enabled:
+                continue
+            for channel_id in settings.poll_channel_ids:
+                try:
+                    created += int(await self.post_poll(channel_id, poll_date))
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to post game poll in channel %s", channel_id
+                    )
         return created
 
     async def restore_open_poll_views(self, poll_date: date) -> int:
         """Bind persisted button views to today's open poll messages."""
         restored = 0
-        for channel_id in self.channel_ids:
+        channel_ids = [
+            channel_id
+            for settings in self._configured_settings()
+            for channel_id in settings.poll_channel_ids
+        ]
+        for channel_id in channel_ids:
             poll = await self.store.get_poll(channel_id, poll_date)
             if poll and poll.get("message_id") and poll.get("status", "open") == "open":
                 self.bot.add_view(
@@ -387,23 +433,28 @@ class GamePollService:
     async def _post_poll(self, channel_id: int, poll_date: date) -> bool:
         channel = await self._get_channel(channel_id)
         guild_id = channel.guild.id
+        settings = self.settings_for(guild_id)
         poll = await self.store.create_poll(guild_id, channel_id, poll_date)
         if poll.get("message_id"):
             return False
 
-        embed = poll_embed(poll_date, self.timezone_name, self.report_time)
+        embed = poll_embed(poll_date, self.timezone_name, settings.report_time)
         return await self.deliver_daily(
-            channel, poll, poll_date, "poll", embed, GamePollView(self)
+            channel, poll, poll_date, "poll", embed, GamePollView(self), settings
         )
 
-    async def deliver_daily(self, channel, poll, poll_date, action, embed, view=None):
+    async def deliver_daily(
+        self, channel, poll, poll_date, action, embed, view=None, settings=None
+    ):
         task = None
         if self.community:
             key = f"daily:{action}:{channel.id}:{poll_date}"
             existing = self.community.get(key)
             if existing and existing.get("status") in {"running", "review", "sent"}:
                 return False
-            clock = self.poll_time if action == "poll" else self.report_time
+            if settings is None:
+                settings = self.settings_for(channel.guild.id)
+            clock = settings.poll_time if action == "poll" else settings.report_time
             expected = datetime.combine(
                 poll_date, clock_time.fromisoformat(clock), ZoneInfo(self.timezone_name)
             )
@@ -523,7 +574,7 @@ class GamePollService:
         if self.community and not self.community.tracking(member.guild.id, member.id):
             return False
         async with self._poll_lifecycle_lock:
-            for poll_channel_id in self.channel_ids:
+            for poll_channel_id in self.settings_for(member.guild.id).poll_channel_ids:
                 poll = await self.store.get_poll(poll_channel_id, poll_date)
                 if poll and int(poll["guild_id"]) == member.guild.id:
                     return await self.store.mark_yes_voice_join(
@@ -663,15 +714,22 @@ class GamePollService:
             )
         return await self.store.reconcile_solo_voice_sessions(solo_channels)
 
-    async def generate_daily_reports(self, poll_date: date) -> int:
+    async def generate_daily_reports(
+        self, poll_date: date, guild_id: int | None = None
+    ) -> int:
         generated = 0
-        for channel_id in self.channel_ids:
-            try:
-                generated += int(await self.generate_report(channel_id, poll_date))
-            except Exception:
-                LOGGER.exception(
-                    "Failed to generate game-poll report for channel %s", channel_id
-                )
+        for settings in self._configured_settings():
+            if guild_id is not None and settings.guild_id != int(guild_id):
+                continue
+            if not settings.report_enabled:
+                continue
+            for channel_id in settings.poll_channel_ids:
+                try:
+                    generated += int(await self.generate_report(channel_id, poll_date))
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to generate game-poll report for channel %s", channel_id
+                    )
         return generated
 
     async def generate_report(self, channel_id: int, poll_date: date) -> bool:
@@ -709,10 +767,12 @@ class GamePollService:
 
         if self.community:
             report = self.community.enrich(poll, report)
+        settings = self.settings_for(channel.guild.id)
         return await self.deliver_daily(
             channel,
             poll,
             poll_date,
             "report",
-            report_embed(poll_date, self.timezone_name, report, self.report_time),
+            report_embed(poll_date, self.timezone_name, report, settings.report_time),
+            settings=settings,
         )
