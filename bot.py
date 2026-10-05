@@ -682,24 +682,24 @@ class ScheduleModal(discord.ui.Modal, title="Adjust Teemo's daily tasks"):
         self.admin_id = admin_id
         settings = settings_registry.get_or_default(guild_id)
         self.poll_time = discord.ui.TextInput(
-            label="Daily poll time (HH:MM)",
+            label="Daily poll time (24-hour, e.g. 11:59)",
             default=settings.poll_time,
             min_length=5,
             max_length=5,
         )
         self.report_time = discord.ui.TextInput(
-            label="Daily summary time (HH:MM)",
+            label="Evening summary time (24-hour, e.g. 17:00)",
             default=settings.report_time,
             min_length=5,
             max_length=5,
         )
         self.poll_channels = discord.ui.TextInput(
-            label="Poll channel ID(s), comma-separated",
+            label="Poll channel IDs (comma-separated)",
             default=",".join(str(value) for value in settings.poll_channel_ids),
             max_length=300,
         )
         self.post_channel = discord.ui.TextInput(
-            label="News / announcement channel ID",
+            label="News channel ID",
             default=str(settings.announcement_channel_id or current_channel_id),
             max_length=20,
         )
@@ -1286,7 +1286,7 @@ async def setclip(
 ):
     if (audio is None) == (url is None):
         await interaction.response.send_message(
-            "❌ Provide exactly one source: either an audio attachment or a direct audio URL.",
+            "❌ Send one thing: either attach an audio file **or** paste a direct link to one.",
             ephemeral=True,
         )
         return
@@ -1295,7 +1295,7 @@ async def setclip(
         ext = os.path.splitext(audio.filename or "")[1].lower()
         if ext not in ALLOWED_EXT:
             await interaction.response.send_message(
-                f"❌ Unsupported file type `{ext}`. Use one of: {', '.join(sorted(ALLOWED_EXT))}",
+                f"❌ That file type (`{ext or 'none'}`) won't work. Send an MP3, WAV, OGG, M4A, WebM, or Opus file.",
                 ephemeral=True,
             )
             return

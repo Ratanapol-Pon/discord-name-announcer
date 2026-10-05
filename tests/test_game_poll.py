@@ -47,7 +47,7 @@ class GamePollUiTests(unittest.TestCase):
     def test_poll_embed_shows_schedule_and_reason_behavior(self):
         embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok", "18:15")
         self.assertIn("play any game tonight", embed.description)
-        self.assertIn("required reason", embed.fields[0].value)
+        self.assertIn("reason is required", embed.fields[0].value)
         self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
 
     def test_report_embed_contains_counts_names_and_no_reasons(self):
@@ -99,7 +99,7 @@ class GamePollUiTests(unittest.TestCase):
         self.assertNotIn("joined_voice_chat", str(embed.to_dict()))
         self.assertTrue(all(not field.inline for field in embed.fields))
         self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
-        self.assertIn("Saved to Airtable", embed.footer.text)
+        self.assertIn("Saved for the admins", embed.footer.text)
 
     def test_report_empty_and_quiet_night_copy(self):
         for counts, expected in (

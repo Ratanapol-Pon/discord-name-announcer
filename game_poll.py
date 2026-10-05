@@ -36,12 +36,14 @@ def poll_embed(
     embed.add_field(
         name="How to answer",
         value=(
-            "Choose **Yes**, **Maybe**, or **No** below. "
-            "Choosing **Yes** asks for your start time, games and availability. "
-            "Choosing **No** opens a required reason form. "
-            "No reasons may appear in the summary (server setting). "
-            "Voice presence is recorded for admins, not audio. "
-            "Use /teemo_preferences for tracking and optional reminder controls."
+            "Tap **Yes**, **Maybe**, or **No** below — you can change your "
+            "answer until the poll closes.\n"
+            "• **Yes**: pick your start time, games, and when you need to stop.\n"
+            "• **No**: a short reason is required (it may appear in the summary, "
+            "depending on this server's settings).\n"
+            "Teemo notes when you join voice chat for the admins — it never "
+            "records audio. Type `/teemo_preferences` to manage tracking and "
+            "reminders."
         ),
         inline=False,
     )
@@ -159,14 +161,14 @@ def report_embed(
             inline=False,
         )
     embed.set_footer(
-        text=f"Poll closed at {report_time} ({timezone_name}) • All play times use this timezone • Saved to Airtable"
+        text=f"Poll closed at {report_time} ({timezone_name}) • All play times use this timezone • Saved for the admins"
     )
     return embed
 
 
 class NoReasonModal(discord.ui.Modal, title="Why can't you play tonight?"):
     reason = discord.ui.TextInput(
-        label="Reason",
+        label="Your reason",
         placeholder="For example: working late, family plans, or need rest",
         style=discord.TextStyle.paragraph,
         required=True,
@@ -199,7 +201,7 @@ class YesTimeSelect(discord.ui.Select):
             for play_time in PLAY_TIME_OPTIONS
         ]
         super().__init__(
-            placeholder="Select your preferred start time",
+            placeholder="When can you start?",
             min_values=1,
             max_values=1,
             options=options,
@@ -209,7 +211,7 @@ class YesTimeSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.service.community:
             await interaction.response.edit_message(
-                content="Choose games and when you need to finish. Flexible starts at 18:00. Reminders are optional and use Bangkok time.",
+                content="Which games, and when do you need to stop? **Flexible** means any time from 18:00. Reminders are optional and use Bangkok time.",
                 view=GamePlanView(self.service, self.message_id, self.values[0]),
             )
             return
@@ -235,7 +237,7 @@ class GamePlanView(discord.ui.View):
         self.games, self.until, self.reminder = ["Any game"], "23:59", False
 
     @discord.ui.select(
-        placeholder="Choose up to 4 games (default: Any game)",
+        placeholder="Which games? (up to 4 — default: Any game)",
         min_values=1,
         max_values=4,
         options=[discord.SelectOption(label=g) for g in GAMES],
@@ -246,7 +248,7 @@ class GamePlanView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.select(
-        placeholder="Available until (default: 23:59)",
+        placeholder="I need to stop by… (default: 23:59)",
         options=[
             discord.SelectOption(label=t) for t in (*PLAY_TIME_OPTIONS[2:], "23:59")
         ],
@@ -257,11 +259,15 @@ class GamePlanView(discord.ui.View):
         await interaction.response.defer()
 
     @discord.ui.button(
-        label="Reminder: Off", style=discord.ButtonStyle.secondary, row=2
+        label="DM reminder: Off", style=discord.ButtonStyle.secondary, row=2
     )
     async def toggle_reminder(self, interaction, button):
         self.reminder = not self.reminder
-        button.label = "Reminder: On (DM)" if self.reminder else "Reminder: Off"
+        button.label = (
+            "DM reminder: On — 15 min before start"
+            if self.reminder
+            else "DM reminder: Off"
+        )
         await interaction.response.edit_message(view=self)
 
     @discord.ui.button(
@@ -387,7 +393,9 @@ class GamePollService:
             channel, "guild", None
         ):
             raise RuntimeError(
-                f"POLL_CHANNEL_ID {channel_id} is not a server text channel."
+                "One of the configured channels isn't a text channel Teemo can "
+                "post in. It may have been deleted — an admin can pick a new one "
+                "in the daily schedule settings."
             )
         return channel
 

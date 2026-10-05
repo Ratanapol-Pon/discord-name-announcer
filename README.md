@@ -33,8 +33,30 @@ It also runs a daily game poll (times and channels can be changed from
   appear beside the member's name. Long lists show an explicit remaining count
   with full answers available in the admin dashboard. Empty polls get a gentle
   no-replies message. This does not change the schedule, stored data, or yearly recap.
-- A restart between 11:59 and 17:00 catches up a missing poll; a restart after
-  17:00 retries a missing report for an existing poll.
+- The scheduler checks every configured server once a minute: a poll posts
+  only between that server's poll and report times, and its summary after the
+  report time. A restart inside the window catches up a missing poll; a
+  restart after the report time retries a missing report for an existing poll.
+  Posting is idempotent, so catch-up never duplicates a message.
+
+## Multiple servers
+
+Teemo works in any number of Discord servers at once; every server's polls,
+settings, events, backups and web console sessions are kept separate.
+
+- When Teemo joins a new server it posts a welcome message with a **Set up
+  Teemo** button in the system channel (the server owner gets a DM instead if
+  no channel is writable). Setup uses Discord channel pickers — no IDs to
+  copy — and saves safe defaults (poll 11:59, summary 17:00 Bangkok).
+- Until setup is saved, the server gets name announcements only; no polls.
+  Servers that never finish setup get exactly one reminder after 24 hours.
+- Admins can re-run setup anytime with `/teemo_setup`, or fine-tune times,
+  channels and task switches per server in the web console.
+- Each server's settings live in `Bot Settings` under a record keyed by that
+  server's ID. A legacy single-server `global` record is copied once to the
+  server that owns its channels and is never deleted.
+- The yearly summary posts once per configured server, in that server's
+  announcement channel.
 
 ## Community planning and admin tools
 
@@ -116,11 +138,13 @@ Run offline checks with `python -m unittest discover -s tests` and
   - `/setclip @member audio:<file>` — add or **replace** a clip by uploading it
   - `/setclip @member url:<link>` — add or **replace** a clip from a direct audio URL
   - `/removeclip @member` — delete a clip
-  - `/clips` — list who has clips
+  - `/clips` — list who has clips (only members of the server where it runs)
+  - `/teemo_setup` — pick daily poll/news channels with channel pickers
   - `/gamepoll_test` — post today's poll immediately
   - `/gamepoll_test_report` — close today's poll and post its report immediately
   - `/teemo_web` or `/teemo_admin` — get a private, one-use sign-in link to the
-    web console (server administrators only)
+    web console (server administrators only; the console shows only the server
+    where the command was run)
 
 News and announcement posts use an embed in the configured post channel.
 Discord mentions are disabled, so text such as `@everyone` will not ping people.
@@ -166,13 +190,15 @@ Create a base named **Teemo Game Polls** with these tables and fields:
   `Guild ID`, `User ID`, `Display Name`, `Voice Channel ID`, `Voice Channel
   Name`, `Started Alone At`, `Ended Alone At`, `Duration Seconds` (number),
   `Session Date`, and `Status`.
-- `Bot Settings`: `Setting Key` (primary text), `Poll Time`, `Report Time`,
-  `Poll Channel IDs`, `Announcement Channel ID`, `Updated At`, `Updated By`,
-  `Poll Enabled`, and `Report Enabled` (text: `yes` / `no`; missing means enabled).
+- `Bot Settings`: `Setting Key` (primary text — one record per server, keyed
+  by the server's Discord ID; a legacy `global` record is migrated on startup),
+  `Poll Time`, `Report Time`, `Poll Channel IDs`, `Announcement Channel ID`,
+  `Updated At`, `Updated By`, `Poll Enabled`, and `Report Enabled` (text:
+  `yes` / `no`; missing means enabled).
 - `Admin Events` and `Event Votes`: each has `Key` (primary text), `Guild ID`,
   `Title`, `Status`, `Updated At` (text), and `Data` (long text containing JSON).
 
-The `Bot Settings` record with key `global` is created or updated by the admin
+Each server's `Bot Settings` record is created by `/teemo_setup` or the admin
 panel. Changes apply immediately and are restored from Airtable after a restart.
 
 ## Web console
@@ -268,10 +294,14 @@ Copy `.env.example` to `.env`, then set:
 
 ```dotenv
 DISCORD_TOKEN=your_discord_bot_token
-POLL_CHANNEL_ID=your_discord_text_channel_id
 AIRTABLE_BASE_ID=app_your_airtable_base_id
 AIRTABLE_TOKEN=your_airtable_personal_access_token
 ```
+
+`POLL_CHANNEL_ID` (or comma-separated `POLL_CHANNEL_IDS`) is now **optional**:
+when set, it seeds the daily poll channel for the server that owns it on first
+startup. New servers pick their channels with `/teemo_setup` instead — no IDs
+needed.
 
 To copy a Discord channel ID, enable Discord **Developer Mode**, right-click the
 target text channel, and choose **Copy Channel ID**.
@@ -316,7 +346,8 @@ setup work — ask me if you want that path instead).
 ## Files
 | File | Purpose |
 |---|---|
-| `bot.py` | Discord bot, name announcer, and Bangkok scheduler |
+| `bot.py` | Discord bot, name announcer, per-guild Bangkok scheduler, onboarding, slash commands, wiring |
+| `guild_config.py` | Per-server settings model and registry (safe defaults for new servers) |
 | `game_poll.py` | Persistent Discord poll UI and summaries |
 | `admin_web.py` / `web/` | Protected web API and responsive admin console |
 | `event_manager.py` | Persistent one-time polls, posts, voting, and scheduling |
