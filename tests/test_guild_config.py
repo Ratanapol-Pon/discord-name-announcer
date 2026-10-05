@@ -1,7 +1,8 @@
 import os
 import tempfile
 import unittest
-from datetime import date, datetime
+import unittest.mock
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
@@ -295,6 +296,151 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
             bot.game_poll_service = old_service
             bot.settings_registry = old_registry
             bot.bot.get_channel = old_bot_channel
+
+
+class FakeCommunity:
+    """Minimal in-memory stand-in for Community onboarding state."""
+
+    def __init__(self):
+        self.ready = True
+        self.rows = {}
+
+    def get(self, key, default=None):
+        return self.rows.get(key, default)
+
+    async def put(self, key, guild_id, kind, data):
+        item = dict(data, key=key, guild_id=str(guild_id), kind=kind)
+        self.rows[key] = item
+        return item
+
+
+def _fake_guild(guild_id=99, with_channel=True):
+    channel = SimpleNamespace(
+        id=456,
+        send=AsyncMock(),
+        permissions_for=lambda _me: SimpleNamespace(send_messages=True),
+    )
+    guild = SimpleNamespace(
+        id=guild_id,
+        name="Test Server",
+        owner_id=7,
+        me=SimpleNamespace(),
+        system_channel=channel if with_channel else None,
+        text_channels=[channel] if with_channel else [],
+    )
+    return guild, channel
+
+
+class OnboardingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.old_registry = bot.settings_registry
+        self.old_web_admin = bot.web_admin
+        self.old_service = bot.game_poll_service
+        bot.settings_registry = GuildSettingsRegistry()
+        self.community = FakeCommunity()
+        bot.web_admin = SimpleNamespace(community=self.community)
+        bot.game_poll_service = MagicMock()
+
+    def tearDown(self):
+        bot.settings_registry = self.old_registry
+        bot.web_admin = self.old_web_admin
+        bot.game_poll_service = self.old_service
+
+    async def test_new_server_gets_welcome_with_setup_button(self):
+        guild, channel = _fake_guild()
+        await bot.on_guild_join(guild)
+
+        channel.send.assert_awaited_once()
+        kwargs = channel.send.await_args.kwargs
+        self.assertIsInstance(kwargs["view"], bot.WelcomeView)
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+        record = self.community.get("onboard:99")
+        self.assertIsNotNone(record)
+        self.assertFalse(record["reminded"])
+
+    async def test_configured_server_rejoin_stays_silent(self):
+        bot.settings_registry.put(GuildSettings(99, poll_channel_ids=[456]))
+        guild, channel = _fake_guild()
+        await bot.on_guild_join(guild)
+        channel.send.assert_not_awaited()
+
+    async def test_setup_save_persists_per_guild_settings(self):
+        guild, channel = _fake_guild()
+        poll_channel = SimpleNamespace(id=555)
+        view = bot.SetupChannelsView(99, 7)
+        view.poll_channel = poll_channel
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=7, guild_permissions=SimpleNamespace(administrator=True)
+            ),
+            response=SimpleNamespace(
+                defer=AsyncMock(),
+                send_message=AsyncMock(),
+                is_done=lambda: True,
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with unittest.mock.patch.object(
+            bot, "_save_guild_settings", new=AsyncMock()
+        ) as save:
+            await view.save.callback(interaction)
+
+        settings = save.await_args.args[0]
+        self.assertEqual(99, settings.guild_id)
+        self.assertEqual([555], settings.poll_channel_ids)
+        self.assertTrue(settings.setup_complete)
+
+    async def test_setup_requires_poll_channel_first(self):
+        view = bot.SetupChannelsView(99, 7)
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        await view.save.callback(interaction)
+        text = interaction.response.send_message.await_args.args[0]
+        self.assertIn("daily game poll", text)
+
+    async def test_reminder_goes_once_after_24_hours(self):
+        from unittest.mock import PropertyMock, patch
+
+        guild, channel = _fake_guild()
+        joined = datetime(2026, 9, 1, 12, 0, tzinfo=BANGKOK)
+        await self.community.put(
+            "onboard:99", 99, "onboard",
+            {"joined_at": joined.isoformat(), "reminded": False},
+        )
+        with patch.object(
+            type(bot.bot), "guilds", new_callable=PropertyMock
+        ) as guilds:
+            guilds.return_value = [guild]
+            # 12 hours later: too early.
+            await bot._onboarding_tick(joined + timedelta(hours=12))
+            channel.send.assert_not_awaited()
+            # 25 hours later: one reminder, then never again.
+            await bot._onboarding_tick(joined + timedelta(hours=25))
+            channel.send.assert_awaited_once()
+            self.assertTrue(self.community.get("onboard:99")["reminded"])
+            channel.send.reset_mock()
+            await bot._onboarding_tick(joined + timedelta(hours=49))
+            channel.send.assert_not_awaited()
+
+    async def test_configured_server_gets_no_reminder(self):
+        from unittest.mock import PropertyMock, patch
+
+        bot.settings_registry.put(GuildSettings(99, poll_channel_ids=[456]))
+        guild, channel = _fake_guild()
+        await self.community.put(
+            "onboard:99", 99, "onboard",
+            {"joined_at": "2026-09-01T12:00:00+07:00", "reminded": False},
+        )
+        with patch.object(
+            type(bot.bot), "guilds", new_callable=PropertyMock
+        ) as guilds:
+            guilds.return_value = [guild]
+            await bot._onboarding_tick(
+                datetime(2026, 9, 5, 12, 0, tzinfo=BANGKOK)
+            )
+        channel.send.assert_not_awaited()
 
 
 if __name__ == "__main__":

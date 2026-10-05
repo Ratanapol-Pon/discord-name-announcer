@@ -17,7 +17,7 @@ import os
 import socket
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as clock_time
 from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -435,7 +435,12 @@ def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
 @tasks.loop(minutes=1)
 async def daily_scheduler():
     """Per-guild daily poll/report schedule; also covers restart catch-up."""
-    await run_due_daily_tasks(datetime.now(BOT_TIMEZONE))
+    now = datetime.now(BOT_TIMEZONE)
+    await run_due_daily_tasks(now)
+    try:
+        await _onboarding_tick(now)
+    except Exception:
+        LOGGER.exception("Onboarding reminder tick failed")
 
 
 async def run_due_daily_tasks(now: datetime) -> None:
@@ -918,6 +923,268 @@ class AdminPanelView(discord.ui.View):
         )
 
 
+# ---------------------------------------------------------------- onboarding
+
+WELCOME_TEXT = (
+    "Hi, I'm Teemo 👋 I play a short recording of each friend's name when "
+    "they join a voice chat with others, and I can post a daily poll asking "
+    "who wants to play tonight.\n\n"
+    "Name announcements already work. To turn on the daily game poll, a "
+    "server admin can tap **Set up Teemo** below — it takes about a minute."
+)
+
+SETUP_REMINDER_TEXT = (
+    "Just a one-time nudge: Teemo's daily game poll isn't set up yet. "
+    "Name announcements already work — if you'd also like the daily "
+    "\"who's playing tonight?\" poll, an admin can tap **Set up Teemo** "
+    "or type `/teemo_setup`. I won't mention this again."
+)
+
+
+class SetupChannelsView(discord.ui.View):
+    """Ephemeral channel picker used by both the welcome button and /teemo_setup."""
+
+    def __init__(self, guild_id: int, admin_id: int) -> None:
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        self.admin_id = admin_id
+        current = settings_registry.get_or_default(guild_id)
+        self.poll_channel: discord.abc.GuildChannel | None = None
+        self.news_channel: discord.abc.GuildChannel | None = None
+        if current.poll_channel_ids:
+            self.pick_poll.default_values = current.poll_channel_ids[:1]
+        if current.announcement_channel_id:
+            self.pick_news.default_values = [current.announcement_channel_id]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.admin_id and _is_administrator(
+            interaction.user
+        ):
+            return True
+        await interaction.response.send_message(
+            "Only the server admin who started setup can use this.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="Channel for the daily game poll",
+    )
+    async def pick_poll(self, interaction: discord.Interaction, select) -> None:
+        self.poll_channel = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="News channel (optional — polls work without it)",
+        min_values=0,
+    )
+    async def pick_news(self, interaction: discord.Interaction, select) -> None:
+        self.news_channel = select.values[0] if select.values else None
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Save setup", style=discord.ButtonStyle.success)
+    async def save(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        if self.poll_channel is None:
+            await interaction.response.send_message(
+                "Pick a channel for the daily game poll first, then tap "
+                "**Save setup**.",
+                ephemeral=True,
+            )
+            return
+        if not game_poll_service:
+            await interaction.response.send_message(
+                "Teemo is still starting up. Please try again in a moment.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        current = settings_registry.get_or_default(self.guild_id)
+        settings = GuildSettings(
+            self.guild_id,
+            poll_time=current.poll_time,
+            report_time=current.report_time,
+            poll_channel_ids=[self.poll_channel.id],
+            announcement_channel_id=(
+                self.news_channel.id if self.news_channel else None
+            ),
+            poll_enabled=current.poll_enabled,
+            report_enabled=current.report_enabled,
+        )
+        try:
+            await _save_guild_settings(
+                settings, f"{interaction.user} ({interaction.user.id})"
+            )
+        except (TypeError, ValueError, discord.HTTPException) as exc:
+            await interaction.followup.send(
+                f"Setup couldn't be saved: {exc}", ephemeral=True
+            )
+            return
+        except Exception:
+            LOGGER.exception("Guild setup save failed")
+            await interaction.followup.send(
+                "Setup couldn't be saved right now. Please try again shortly.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"All set! 🎉 The daily poll will appear in <#{self.poll_channel.id}> "
+            f"at **{settings.poll_time}** and the evening summary at "
+            f"**{settings.report_time}** ({TIMEZONE_NAME}).\n"
+            "Admins can change times and channels anytime with `/teemo_web`.",
+            ephemeral=True,
+        )
+
+
+class WelcomeView(discord.ui.View):
+    """The public welcome message's single setup button."""
+
+    def __init__(self, guild_id: int) -> None:
+        super().__init__(timeout=24 * 3600)
+        self.guild_id = guild_id
+
+    @discord.ui.button(
+        label="Set up Teemo",
+        style=discord.ButtonStyle.primary,
+        emoji="🛠️",
+    )
+    async def setup(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        if not _is_administrator(interaction.user):
+            await interaction.response.send_message(
+                "Setup is for server admins — ask one of them to tap this "
+                "button or type `/teemo_setup`.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Choose where Teemo should post. Everything can be changed later "
+            "with `/teemo_web`.",
+            view=SetupChannelsView(self.guild_id, interaction.user.id),
+            ephemeral=True,
+        )
+
+
+def _welcome_channel(guild: discord.Guild):
+    """System channel first, then the first text channel Teemo can post in."""
+    me = guild.me
+    candidates = [guild.system_channel] if guild.system_channel else []
+    candidates.extend(guild.text_channels)
+    for channel in candidates:
+        if channel and channel.permissions_for(me).send_messages:
+            return channel
+    return None
+
+
+async def _mark_onboarding(guild_id: int, **fields) -> None:
+    community = web_admin.community if web_admin else None
+    if not community or not community.ready:
+        return
+    key = f"onboard:{guild_id}"
+    record = community.get(key) or {}
+    try:
+        await community.put(key, guild_id, "onboard", dict(record, **fields))
+    except Exception:
+        LOGGER.exception("Failed to record onboarding state for %s", guild_id)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Welcome a brand-new server; a configured server (re-invite) stays quiet."""
+    existing = settings_registry.for_guild(guild.id)
+    if existing and existing.setup_complete:
+        return
+    await _mark_onboarding(
+        guild.id, joined_at=datetime.now(BOT_TIMEZONE).isoformat(), reminded=False
+    )
+    channel = _welcome_channel(guild)
+    if channel is not None:
+        try:
+            await channel.send(
+                WELCOME_TEXT,
+                view=WelcomeView(guild.id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except discord.HTTPException:
+            LOGGER.exception("Welcome message failed in server %s", guild.id)
+    # No writable channel: tell the owner directly how to start setup.
+    try:
+        owner = await bot.fetch_user(guild.owner_id)
+        await owner.send(
+            f"Thanks for adding Teemo to **{guild.name}**! Name announcements "
+            "already work. To turn on the daily game poll, type `/teemo_setup` "
+            "in any channel of your server.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except (discord.HTTPException, AttributeError):
+        LOGGER.warning("Could not reach the owner of server %s", guild.id)
+
+
+async def _onboarding_tick(now: datetime) -> None:
+    """One gentle reminder, 24h after joining, for servers that never set up."""
+    community = web_admin.community if web_admin else None
+    if not community or not community.ready:
+        return
+    for guild in bot.guilds:
+        existing = settings_registry.for_guild(guild.id)
+        if existing and existing.setup_complete:
+            continue
+        record = community.get(f"onboard:{guild.id}")
+        if not record:
+            # The join happened while storage was unavailable; start the clock now.
+            await _mark_onboarding(guild.id, joined_at=now.isoformat(), reminded=False)
+            continue
+        if record.get("reminded"):
+            continue
+        try:
+            joined_at = datetime.fromisoformat(str(record.get("joined_at", "")))
+        except ValueError:
+            continue
+        if joined_at.tzinfo is None:
+            joined_at = joined_at.replace(tzinfo=BOT_TIMEZONE)
+        if now - joined_at.astimezone(BOT_TIMEZONE) < timedelta(hours=24):
+            continue
+        channel = _welcome_channel(guild)
+        if channel is not None:
+            try:
+                await channel.send(
+                    SETUP_REMINDER_TEXT,
+                    view=WelcomeView(guild.id),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                LOGGER.exception("Setup reminder failed in server %s", guild.id)
+        await _mark_onboarding(guild.id, reminded=True)
+
+
+@bot.tree.command(
+    name="teemo_setup",
+    description="Set up (or change) Teemo's daily game poll for this server (admin only)",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(administrator=True)
+async def teemo_setup(interaction: discord.Interaction):
+    if not game_poll_service:
+        await interaction.response.send_message(
+            "Teemo is still starting up. Please try again in a moment.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(
+        "Choose where Teemo should post. Everything can be changed later "
+        "with `/teemo_web`.",
+        view=SetupChannelsView(interaction.guild_id, interaction.user.id),
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(
     name="teemo_admin",
     description="Open Teemo's private bot-management panel (admin only)",
@@ -1122,11 +1389,15 @@ async def clips(interaction: discord.Interaction):
 @clips.error
 @gamepoll_test.error
 @gamepoll_test_report.error
+@teemo_setup.error
 @teemo_admin.error
 @teemo_web.error
 async def admin_only_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.errors.MissingPermissions):
-        await interaction.response.send_message("❌ Admins only.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ This one is for server admins. Ask an admin to run it for you.",
+            ephemeral=True,
+        )
     else:
         raise error
 
