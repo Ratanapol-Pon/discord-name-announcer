@@ -1096,16 +1096,24 @@ async def removeclip(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_permissions(administrator=True)
 async def clips(interaction: discord.Interaction):
     files = glob.glob(os.path.join(CLIP_DIR, "*.*"))
-    if not files:
-        await interaction.response.send_message("No clips saved yet.", ephemeral=True)
-        return
     lines = []
     for f in files:
-        uid = int(os.path.splitext(os.path.basename(f))[0])
-        m = interaction.guild.get_member(uid)
-        lines.append(f"• {m.display_name if m else f'unknown user {uid}'}")
+        try:
+            uid = int(os.path.splitext(os.path.basename(f))[0])
+        except ValueError:
+            continue
+        # Only this server's members are listed; clips of people who left
+        # or belong to other servers stay private.
+        m = interaction.guild.get_member(uid) if interaction.guild else None
+        if m:
+            lines.append(f"• {m.display_name}")
+    if not lines:
+        await interaction.response.send_message(
+            "No clips saved yet for this server's members.", ephemeral=True
+        )
+        return
     await interaction.response.send_message(
-        "Saved clips:\n" + "\n".join(lines), ephemeral=True
+        "Saved clips:\n" + "\n".join(sorted(lines)), ephemeral=True
     )
 
 

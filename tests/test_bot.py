@@ -113,6 +113,31 @@ class ClipSourceTests(unittest.IsolatedAsyncioTestCase):
             with open(os.path.join(temp_dir, "123.mp3"), "rb") as installed:
                 self.assertEqual(b"new", installed.read())
 
+    async def test_clips_lists_only_current_server_members(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for user_id in (123, 456):
+                with open(os.path.join(temp_dir, f"{user_id}.mp3"), "wb") as f:
+                    f.write(b"clip")
+
+            member = SimpleNamespace(display_name="Rz")
+            guild = SimpleNamespace(
+                get_member=lambda uid: member if uid == 123 else None
+            )
+            interaction = SimpleNamespace(
+                guild=guild,
+                response=SimpleNamespace(send_message=AsyncMock()),
+            )
+            with patch.object(bot, "CLIP_DIR", temp_dir):
+                await bot.clips.callback(interaction)
+
+            text = interaction.response.send_message.await_args.args[0]
+            self.assertIn("Rz", text)
+            self.assertNotIn("456", text)
+            self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
+
 
 if __name__ == "__main__":
     unittest.main()
