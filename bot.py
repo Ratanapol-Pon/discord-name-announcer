@@ -156,6 +156,7 @@ def configure_game_poll() -> None:
     game_poll_service.poll_time = f"{POLL_CLOCK:%H:%M}"
     game_poll_service.settings_provider = settings_registry
     bot.add_view(GamePollView(game_poll_service))
+    bot.add_view(WelcomeView())  # persistent: welcome buttons survive restarts
 
 
 def _parse_channel_ids(value: str) -> list[int]:
@@ -1042,33 +1043,47 @@ class SetupChannelsView(discord.ui.View):
 
 
 class WelcomeView(discord.ui.View):
-    """The public welcome message's single setup button."""
+    """The public welcome message's single setup button.
 
-    def __init__(self, guild_id: int) -> None:
-        super().__init__(timeout=24 * 3600)
+    Persistent (timeout=None + fixed custom_id) and registered at startup,
+    so the button keeps working after a bot restart.
+    """
+
+    def __init__(self, guild_id: int | None = None) -> None:
+        super().__init__(timeout=None)
         self.guild_id = guild_id
 
     @discord.ui.button(
         label="Set up Teemo",
         style=discord.ButtonStyle.primary,
         emoji="🛠️",
+        custom_id="teemo:welcome_setup",
     )
     async def setup(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        if not _is_administrator(interaction.user):
+        guild_id = self.guild_id or interaction.guild_id
+        try:
+            if not guild_id or not _is_administrator(interaction.user):
+                await interaction.response.send_message(
+                    "Setup is for server admins — ask one of them to tap this "
+                    "button or type `/teemo_setup` in the server.",
+                    ephemeral=True,
+                )
+                return
             await interaction.response.send_message(
-                "Setup is for server admins — ask one of them to tap this "
-                "button or type `/teemo_setup`.",
+                "Choose where Teemo should post. Everything can be changed later "
+                "with `/teemo_web`.",
+                view=SetupChannelsView(guild_id, interaction.user.id),
                 ephemeral=True,
             )
-            return
-        await interaction.response.send_message(
-            "Choose where Teemo should post. Everything can be changed later "
-            "with `/teemo_web`.",
-            view=SetupChannelsView(self.guild_id, interaction.user.id),
-            ephemeral=True,
-        )
+        except Exception:
+            LOGGER.exception("Welcome setup button failed")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "That didn't work — please type `/teemo_setup` instead.",
+                    ephemeral=True,
+                )
 
 
 def _welcome_channel(guild: discord.Guild):
