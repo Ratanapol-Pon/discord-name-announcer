@@ -953,9 +953,13 @@ class SetupChannelsView(discord.ui.View):
         self.poll_channel: discord.abc.GuildChannel | None = None
         self.news_channel: discord.abc.GuildChannel | None = None
         if current.poll_channel_ids:
-            self.pick_poll.default_values = current.poll_channel_ids[:1]
+            self.pick_poll.default_values = [
+                discord.Object(id=cid) for cid in current.poll_channel_ids[:1]
+            ]
         if current.announcement_channel_id:
-            self.pick_news.default_values = [current.announcement_channel_id]
+            self.pick_news.default_values = [
+                discord.Object(id=current.announcement_channel_id)
+            ]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.admin_id and _is_administrator(
