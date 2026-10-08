@@ -1459,7 +1459,7 @@ async def teemo_preferences(interaction: discord.Interaction, tracking: bool | N
             f"Public yearly voice totals: **{'On' if prefs.get('public_yearly', True) else 'Off'}**\n"
             f"Quiet hours: **{prefs['quiet_start']}–{prefs['quiet_end']} Bangkok**\n\n"
             "Teemo records voice presence, not audio. Pausing stops future voice/solo and attendance tracking; existing records remain. "
-            "Poll votes remain saved. Turning reminders on still requires opting in on each game plan. "
+            "Poll votes remain saved. Turning reminders on sends you one DM 15 minutes before suggested game times. "
             "No-vote reasons may be public depending on the server setting. Ask an admin about existing records.", ephemeral=True)
     except ValueError as exc:
         await interaction.followup.send(str(exc), ephemeral=True)

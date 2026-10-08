@@ -11,7 +11,7 @@ from test_admin_web import MemoryStore, event_input, fixture
 from backups import Backups
 from community import Community
 from event_manager import EventManager, utcnow
-from game_poll import GamePlanView, GamePollService, report_embed
+from game_poll import GamePollService, report_embed
 from planning import BANGKOK, report_period, suggest, validate_plan
 
 
@@ -271,11 +271,6 @@ class CommunityTests(unittest.IsolatedAsyncioTestCase):
         for user_id in (1, 2):
             await self.community.confirm_plan("p1", user_id)
         self.assertEqual(2, self.community.enrich(poll, report)["suggestion"]["count"])
-
-    async def test_plan_view_has_selectors_and_explicit_save(self):
-        view = GamePlanView(self.community.polls, 123, "19:00")
-        self.assertEqual(4, len(view.children))
-        self.assertFalse(view.reminder)
 
     async def seed_reminders(self):
         poll = {"id": "p1", "guild_id": 99, "poll_date": "2026-09-24"}

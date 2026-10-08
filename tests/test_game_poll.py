@@ -9,6 +9,7 @@ from game_poll import (
     GamePollService,
     GamePollView,
     NoReasonModal,
+    YesTimeSelect,
     YesTimeView,
     poll_embed,
     report_embed,
@@ -44,10 +45,10 @@ class GamePollUiTests(unittest.TestCase):
         self.assertEqual("18:00", select.options[1].value)
         self.assertEqual("23:30", select.options[-1].value)
 
-    def test_poll_embed_shows_schedule_and_reason_behavior(self):
+    def test_poll_embed_shows_schedule_without_instruction_field(self):
         embed = poll_embed(date(2026, 9, 1), "Asia/Bangkok", "18:15")
         self.assertIn("play any game tonight", embed.description)
-        self.assertIn("reason is required", embed.fields[0].value)
+        self.assertEqual([], embed.fields)
         self.assertIn("18:15 (Asia/Bangkok)", embed.footer.text)
 
     def test_report_embed_contains_counts_names_and_no_reasons(self):
@@ -216,6 +217,38 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_poll_message.assert_awaited_once_with(7, 800)
         sent_view = self.channel.send.await_args.kwargs["view"]
         self.assertIsInstance(sent_view, GamePollView)
+
+    async def test_yes_time_saves_default_plan_without_game_pickers(self):
+        community = MagicMock()
+        community.preferences.return_value = {"reminders": True}
+        self.service.community = community
+        self.service.save_interaction_response = AsyncMock()
+        select = SimpleNamespace(service=self.service, message_id=123, values=["19:00"])
+        interaction = SimpleNamespace(guild_id=99, user=SimpleNamespace(id=7))
+
+        await YesTimeSelect.callback(select, interaction)
+
+        community.preferences.assert_called_once_with(99, 7)
+        self.service.save_interaction_response.assert_awaited_once_with(
+            interaction,
+            123,
+            "yes",
+            None,
+            play_time="19:00",
+            plan={"games": ["Any game"], "until": "23:59", "reminder": True},
+        )
+
+    async def test_yes_time_without_community_saves_no_plan(self):
+        self.service.community = None
+        self.service.save_interaction_response = AsyncMock()
+        select = SimpleNamespace(service=self.service, message_id=123, values=["20:00"])
+        interaction = SimpleNamespace(guild_id=99, user=SimpleNamespace(id=7))
+
+        await YesTimeSelect.callback(select, interaction)
+
+        self.service.save_interaction_response.assert_awaited_once_with(
+            interaction, 123, "yes", None, play_time="20:00", plan=None
+        )
 
     async def test_existing_poll_is_not_posted_twice(self):
         self.store.create_poll = AsyncMock(

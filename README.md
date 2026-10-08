@@ -60,11 +60,11 @@ settings, events, backups and web console sessions are kept separate.
 
 ## Community planning and admin tools
 
-- **Yes → start time → games → available until → Save Yes + plan.** Choose up to
-  four games or Any game. Flexible means 18:00 onwards; windows end the same
-  evening. The summary suggests the game and earliest half-hour start with the
-  largest overlap of at least 30 minutes and two members. This is a suggestion,
-  not a booking. Legacy Yes votes without availability are not guessed.
+- **Yes → start time → saved.** Every Yes counts as Any game until 23:59, so no
+  game or leaving-time pickers are shown. Flexible means 18:00 onwards. The
+  summary suggests the earliest half-hour start with the largest overlap of at
+  least 30 minutes and two members. This is a suggestion, not a booking. Legacy
+  Yes votes without availability are not guessed.
 - **Date ranges:** Today, this week (Monday onwards), this month, last 30 calendar
   days, this year, and custom ranges of up to 367 days. All boundaries are Bangkok
   midnight. The end date is inclusive; ongoing sessions stop at the current time.
@@ -79,11 +79,12 @@ settings, events, backups and web console sessions are kept separate.
   original. Both require confirmation and an idempotent operation ID. Saved votes
   are unchanged. A fresh preview starts a new operation. Previews are text-only,
   not an exact rendering of every Discord client.
-- **Reminders:** opt in on the game plan; Teemo sends one DM 15 minutes before the
-  suggested group start, only to opted-in members included in that overlap. Global
-  opt-out and quiet hours take priority (default 23:00–09:00 Bangkok). No reminders
-  are sent after the start time, and blocked DMs never fall back to public pings.
-  Late recovery within the 15-minute window can send the reminder late.
+- **Reminders:** opt in once via `/teemo_preferences`; Teemo sends one DM 15
+  minutes before the suggested group start, only to opted-in members included in
+  that overlap. Global opt-out and quiet hours take priority (default
+  23:00–09:00 Bangkok). No reminders are sent after the start time, and blocked
+  DMs never fall back to public pings. Late recovery within the 15-minute window
+  can send the reminder late.
 - **Recurring templates:** select an existing event poll/news/announcement as the
   source, choose daily/weekly/fortnightly publication and relative closing/event
   times. Templates save paused; an admin must explicitly enable automatic posts.

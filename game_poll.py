@@ -19,7 +19,6 @@ from airtable_store import (
     PollNotFoundError,
 )
 from guild_config import GuildSettings
-from planning import GAMES, validate_plan
 
 LOGGER = logging.getLogger(__name__)
 POLL_QUESTION = "Does anyone want to play any game tonight?"
@@ -32,20 +31,6 @@ def poll_embed(
         title="Tonight's game poll",
         description=POLL_QUESTION,
         color=discord.Color.blurple(),
-    )
-    embed.add_field(
-        name="How to answer",
-        value=(
-            "Tap **Yes**, **Maybe**, or **No** below — you can change your "
-            "answer until the poll closes.\n"
-            "• **Yes**: pick your start time, games, and when you need to stop.\n"
-            "• **No**: a short reason is required (it may appear in the summary, "
-            "depending on this server's settings).\n"
-            "Teemo notes when you join voice chat for the admins — it never "
-            "records audio. Type `/teemo_preferences` to manage tracking and "
-            "reminders."
-        ),
-        inline=False,
     )
     embed.set_footer(
         text=(
@@ -209,18 +194,25 @@ class YesTimeSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        plan = None
         if self.service.community:
-            await interaction.response.edit_message(
-                content="Which games, and when do you need to stop? **Flexible** means any time from 18:00. Reminders are optional and use Bangkok time.",
-                view=GamePlanView(self.service, self.message_id, self.values[0]),
+            # No game/leaving-time pickers: every Yes counts as "Any game"
+            # until 23:59, so the summary can still suggest an overlap time.
+            prefs = self.service.community.preferences(
+                interaction.guild_id, interaction.user.id
             )
-            return
+            plan = {
+                "games": ["Any game"],
+                "until": "23:59",
+                "reminder": bool(prefs.get("reminders", False)),
+            }
         await self.service.save_interaction_response(
             interaction,
             self.message_id,
             "yes",
             None,
             play_time=self.values[0],
+            plan=plan,
         )
 
 
@@ -228,61 +220,6 @@ class YesTimeView(discord.ui.View):
     def __init__(self, service: GamePollService, message_id: int) -> None:
         super().__init__(timeout=300)
         self.add_item(YesTimeSelect(service, message_id))
-
-
-class GamePlanView(discord.ui.View):
-    def __init__(self, service, message_id, start):
-        super().__init__(timeout=300)
-        self.service, self.message_id, self.start = service, message_id, start
-        self.games, self.until, self.reminder = ["Any game"], "23:59", False
-
-    @discord.ui.select(
-        placeholder="Which games? (up to 4 — default: Any game)",
-        min_values=1,
-        max_values=4,
-        options=[discord.SelectOption(label=g) for g in GAMES],
-        row=0,
-    )
-    async def choose_games(self, interaction, select):
-        self.games = select.values
-        await interaction.response.defer()
-
-    @discord.ui.select(
-        placeholder="I need to stop by… (default: 23:59)",
-        options=[
-            discord.SelectOption(label=t) for t in (*PLAY_TIME_OPTIONS[2:], "23:59")
-        ],
-        row=1,
-    )
-    async def choose_end(self, interaction, select):
-        self.until = select.values[0]
-        await interaction.response.defer()
-
-    @discord.ui.button(
-        label="DM reminder: Off", style=discord.ButtonStyle.secondary, row=2
-    )
-    async def toggle_reminder(self, interaction, button):
-        self.reminder = not self.reminder
-        button.label = (
-            "DM reminder: On — 15 min before start"
-            if self.reminder
-            else "DM reminder: Off"
-        )
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(
-        label="Save Yes + plan", style=discord.ButtonStyle.success, row=2
-    )
-    async def save(self, interaction, button):
-        plan = {"games": self.games, "until": self.until, "reminder": self.reminder}
-        try:
-            validate_plan(plan, self.start)
-        except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
-            return
-        await self.service.save_interaction_response(
-            interaction, self.message_id, "yes", None, self.start, plan=plan
-        )
 
 
 class GamePollView(discord.ui.View):
