@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import Counter
 from datetime import date, datetime, timezone
@@ -11,6 +12,8 @@ from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+
+LOGGER = logging.getLogger(__name__)
 
 AIRTABLE_API_ROOT = "https://api.airtable.com/v0"
 POLLS_TABLE = "Polls"
@@ -20,6 +23,9 @@ VOICE_SESSIONS_TABLE = "Voice Sessions"
 SOLO_VOICE_SESSIONS_TABLE = "Solo Voice Sessions"
 BOT_SETTINGS_TABLE = "Bot Settings"
 MIN_REQUEST_INTERVAL_SECONDS = 0.22  # Airtable limit: 5 requests/second/base.
+# After a monthly-quota 429, pause API calls instead of hammering Airtable;
+# the allowance resets on the first day of each calendar month.
+QUOTA_EXCEEDED_COOLDOWN_SECONDS = 6 * 60 * 60
 PLAY_TIME_OPTIONS = (
     "Flexible",
     "18:00",
@@ -45,6 +51,10 @@ class PollNotFoundError(RuntimeError):
     """Raised when a Discord message is not linked to a stored poll."""
 
 
+class AirtableQuotaExceededError(RuntimeError):
+    """Airtable's monthly API allowance is used up; calls pause until a retry window."""
+
+
 class AirtablePollStore:
     """Persist polls using a PAT restricted to one Airtable base."""
 
@@ -56,6 +66,32 @@ class AirtablePollStore:
         self._solo_voice_session_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._quota_blocked_until = 0.0
+
+    @staticmethod
+    def _is_quota_error(status: int, body: str) -> bool:
+        """Tell a monthly-quota 429 apart from a per-second rate-limit 429."""
+        if status != 429:
+            return False
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        codes: list[str] = []
+        error = payload.get("error")
+        if isinstance(error, dict):
+            codes.append(str(error.get("type", "")))
+        for item in payload.get("errors") or []:
+            if isinstance(item, dict):
+                codes.append(str(item.get("error", "")))
+        return any("BILLING_LIMIT_EXCEEDED" in code for code in codes)
+
+    @property
+    def quota_blocked(self) -> bool:
+        """True while monthly-quota API calls are paused (see _request)."""
+        return time.monotonic() < self._quota_blocked_until
 
     def _table_url(self, table: str, record_id: str | None = None) -> str:
         url = f"{AIRTABLE_API_ROOT}/{quote(self._base_id, safe='')}/{quote(table, safe='')}"
@@ -69,7 +105,7 @@ class AirtablePollStore:
         table: str,
         *,
         record_id: str | None = None,
-        params: dict[str, str | int] | None = None,
+        params: dict[str, str | int] | list[tuple[str, str]] | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         headers = {
@@ -77,6 +113,13 @@ class AirtablePollStore:
             "Content-Type": "application/json",
         }
         async with self._request_lock:
+            blocked_for = self._quota_blocked_until - time.monotonic()
+            if blocked_for > 0:
+                raise AirtableQuotaExceededError(
+                    "Airtable's monthly API limit is used up, so Teemo cannot "
+                    "reach the poll database. Calls are paused; Teemo retries "
+                    f"in about {int(blocked_for // 60) + 1} minutes."
+                )
             elapsed = time.monotonic() - self._last_request_at
             if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
                 await asyncio.sleep(MIN_REQUEST_INTERVAL_SECONDS - elapsed)
@@ -92,13 +135,29 @@ class AirtablePollStore:
                         json=payload,
                     ) as response:
                         self._last_request_at = time.monotonic()
+                        body = await response.text()
+                        if self._is_quota_error(response.status, body):
+                            self._quota_blocked_until = (
+                                time.monotonic() + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+                            )
+                            LOGGER.warning(
+                                "Airtable monthly API limit reached; pausing "
+                                "calls for %s hours. The limit resets on the "
+                                "first day of each calendar month.",
+                                QUOTA_EXCEEDED_COOLDOWN_SECONDS // 3600,
+                            )
+                            raise AirtableQuotaExceededError(
+                                "Airtable's monthly API limit is used up, so "
+                                "Teemo cannot reach the poll database. The "
+                                "limit resets on the first day of the month, "
+                                "or right away if the workspace is upgraded."
+                            )
                         if response.status == 429 and attempt == 0:
                             retry_after = min(
                                 float(response.headers.get("Retry-After", 30)), 30
                             )
                             await asyncio.sleep(retry_after)
                             continue
-                        body = await response.text()
                         if response.status < 200 or response.status >= 300:
                             try:
                                 detail = json.loads(body).get("error", body)
@@ -145,6 +204,17 @@ class AirtablePollStore:
             record_id=record_id,
             payload={"fields": fields, "typecast": True},
         )
+
+    async def delete_records(self, table: str, record_ids: list[str]) -> int:
+        """Delete records in batches of 10 (Airtable's per-request delete cap)."""
+        deleted = 0
+        for index in range(0, len(record_ids), 10):
+            chunk = record_ids[index : index + 10]
+            await self._request(
+                "DELETE", table, params=[("records[]", record_id) for record_id in chunk]
+            )
+            deleted += len(chunk)
+        return deleted
 
     async def healthcheck(self) -> None:
         await self._request("GET", POLLS_TABLE, params={"maxRecords": 1})

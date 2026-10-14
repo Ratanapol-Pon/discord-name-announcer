@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -293,6 +294,38 @@ class GamePollService:
         self.settings_provider = None
         self._poll_lifecycle_lock = asyncio.Lock()
         self._delivery_lock = asyncio.Lock()
+        # In-memory daily delivery state. The scheduler ticks every minute, but
+        # once a channel's poll/report is settled for the day there is no need
+        # to ask Airtable again — this keeps Teemo within Airtable's free
+        # monthly API allowance. Repopulated from Airtable once per restart.
+        self._polls_settled: set[tuple[int, date]] = set()
+        self._reports_settled: set[tuple[int, date]] = set()
+        self._last_quota_notice_at = 0.0
+
+    def _quota_blocked(self) -> bool:
+        """True while Airtable's monthly API limit is exhausted.
+
+        Skips daily work without touching the network and reminds the logs
+        at most once per hour instead of every minute.
+        """
+        if not getattr(self.store, "quota_blocked", False):
+            return False
+        now = time.monotonic()
+        if now - self._last_quota_notice_at >= 3600:
+            self._last_quota_notice_at = now
+            LOGGER.warning(
+                "Airtable's monthly API limit is used up, so daily polls are "
+                "paused. Teemo keeps retrying and resumes on its own once the "
+                "limit resets (first day of the month) or the plan is upgraded."
+            )
+        return True
+
+    def _prune_daily_state(self, today: date) -> None:
+        """Drop cache entries from earlier days so the sets stay tiny."""
+        cutoff = today - timedelta(days=1)
+        for cache in (self._polls_settled, self._reports_settled):
+            for key in [key for key in cache if key[1] < cutoff]:
+                cache.discard(key)
 
     def settings_for(self, guild_id: int) -> GuildSettings:
         """Settings for one server; falls back to legacy constructor values."""
@@ -339,6 +372,8 @@ class GamePollService:
     async def post_daily_polls(
         self, poll_date: date, guild_id: int | None = None
     ) -> int:
+        if self._quota_blocked():
+            return 0
         created = 0
         for settings in self._configured_settings():
             if guild_id is not None and settings.guild_id != int(guild_id):
@@ -364,6 +399,10 @@ class GamePollService:
         ]
         for channel_id in channel_ids:
             poll = await self.store.get_poll(channel_id, poll_date)
+            if poll and poll.get("message_id"):
+                # Startup reconciliation: remember the poll is already out so
+                # the minutely scheduler does not re-read Airtable all day.
+                self._polls_settled.add((channel_id, poll_date))
             if poll and poll.get("message_id") and poll.get("status", "open") == "open":
                 self.bot.add_view(
                     GamePollView(self), message_id=int(poll["message_id"])
@@ -376,17 +415,29 @@ class GamePollService:
             return await self._post_poll(channel_id, poll_date)
 
     async def _post_poll(self, channel_id: int, poll_date: date) -> bool:
+        key = (channel_id, poll_date)
+        if key in self._polls_settled:
+            return False
+        self._prune_daily_state(poll_date)
         channel = await self._get_channel(channel_id)
         guild_id = channel.guild.id
         settings = self.settings_for(guild_id)
         poll = await self.store.create_poll(guild_id, channel_id, poll_date)
         if poll.get("message_id"):
+            self._polls_settled.add(key)
             return False
 
         embed = poll_embed(poll_date, self.timezone_name, settings.report_time)
-        return await self.deliver_daily(
+        delivered = await self.deliver_daily(
             channel, poll, poll_date, "poll", embed, GamePollView(self), settings
         )
+        # No exception means the message is sent, or a task already tracks the
+        # attempt (running/review/sent) — either way, stop polling Airtable.
+        self._polls_settled.add(key)
+        if delivered:
+            # A late/manual poll must still get its evening report.
+            self._reports_settled.discard(key)
+        return delivered
 
     async def deliver_daily(
         self, channel, poll, poll_date, action, embed, view=None, settings=None
@@ -662,6 +713,8 @@ class GamePollService:
     async def generate_daily_reports(
         self, poll_date: date, guild_id: int | None = None
     ) -> int:
+        if self._quota_blocked():
+            return 0
         generated = 0
         for settings in self._configured_settings():
             if guild_id is not None and settings.guild_id != int(guild_id):
@@ -682,14 +735,22 @@ class GamePollService:
             return await self._generate_report(channel_id, poll_date)
 
     async def _generate_report(self, channel_id: int, poll_date: date) -> bool:
+        key = (channel_id, poll_date)
+        if key in self._reports_settled:
+            return False
+        self._prune_daily_state(poll_date)
         channel = await self._get_channel(channel_id)
         poll = await self.store.get_poll(channel_id, poll_date)
         if not poll or not poll.get("message_id"):
+            # No poll went out today, so there is nothing to report. A poll
+            # posted later (manual run) clears this mark in _post_poll.
+            self._reports_settled.add(key)
             return False
 
         async with self._poll_lifecycle_lock:
             report = await self.store.get_report(poll["id"])
             if report and report.get("message_id"):
+                self._reports_settled.add(key)
                 return False
             if poll["status"] != "closed":
                 # Close first so a response cannot be accepted after the snapshot.
@@ -713,7 +774,7 @@ class GamePollService:
         if self.community:
             report = self.community.enrich(poll, report)
         settings = self.settings_for(channel.guild.id)
-        return await self.deliver_daily(
+        delivered = await self.deliver_daily(
             channel,
             poll,
             poll_date,
@@ -721,3 +782,7 @@ class GamePollService:
             report_embed(poll_date, self.timezone_name, report, settings.report_time),
             settings=settings,
         )
+        # Reached only when no exception was raised: the report is sent, or a
+        # task already tracks the attempt — stop polling Airtable for today.
+        self._reports_settled.add(key)
+        return delivered

@@ -30,7 +30,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from admin_web import AdminWeb
-from airtable_store import AirtablePollStore
+from airtable_store import AirtablePollStore, AirtableQuotaExceededError
 from event_manager import EventManager
 from community import Community
 from backups import Backups
@@ -437,6 +437,14 @@ def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
 async def daily_scheduler():
     """Per-guild daily poll/report schedule; also covers restart catch-up."""
     now = datetime.now(BOT_TIMEZONE)
+    if web_admin and web_admin.community and not web_admin.community.ready:
+        try:
+            # Community state failed to load at startup (e.g. Airtable quota).
+            # While the quota circuit breaker is closed this costs no API call;
+            # once Airtable answers again the bot heals itself without restart.
+            await web_admin.community.restore()
+        except Exception:
+            pass
     await run_due_daily_tasks(now)
     try:
         await _onboarding_tick(now)
@@ -486,6 +494,13 @@ async def on_ready():
             if web_admin and web_admin.community and not web_admin.community.ready:
                 await web_admin.community.restore()
             await game_poll_service.store.healthcheck()
+        except AirtableQuotaExceededError:
+            # Monthly API limit exhausted: keep the bot alive and let the
+            # scheduler's circuit breaker probe until the quota resets.
+            LOGGER.warning(
+                "Airtable's monthly API limit is used up. Teemo keeps running "
+                "and resumes poll work automatically when the limit resets."
+            )
         except Exception:
             LOGGER.exception(
                 "Airtable health check failed. Verify the base schema and access token."
@@ -497,9 +512,13 @@ async def on_ready():
             LOGGER.exception(
                 "Stored Teemo settings are invalid; using environment defaults."
             )
-        restored_views = await game_poll_service.restore_open_poll_views(
-            datetime.now(BOT_TIMEZONE).date()
-        )
+        try:
+            restored_views = await game_poll_service.restore_open_poll_views(
+                datetime.now(BOT_TIMEZONE).date()
+            )
+        except Exception:
+            LOGGER.exception("Failed to restore open poll views")
+            restored_views = 0
         try:
             started_sessions, closed_sessions = (
                 await game_poll_service.reconcile_voice_sessions(

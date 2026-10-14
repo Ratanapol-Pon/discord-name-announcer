@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -410,6 +410,122 @@ class GamePollServiceTests(unittest.IsolatedAsyncioTestCase):
             discord.AllowedMentions.none().to_dict(),
             self.channel.send.await_args.kwargs["allowed_mentions"].to_dict(),
         )
+
+
+class DailyStateCacheTests(unittest.IsolatedAsyncioTestCase):
+    """The minutely scheduler must not re-read Airtable once a day is settled."""
+
+    def setUp(self):
+        self.channel = MagicMock(spec=discord.TextChannel)
+        self.channel.guild = SimpleNamespace(id=99)
+        self.channel.id = 456
+        self.channel.send = AsyncMock()
+        self.channel.fetch_message = AsyncMock()
+
+        self.bot = MagicMock()
+        self.bot.get_channel.return_value = self.channel
+        self.store = MagicMock()
+        self.store.quota_blocked = False
+        self.service = GamePollService(self.bot, self.store, [456], "Asia/Bangkok")
+        self.day = date(2026, 10, 14)
+
+    async def test_settled_poll_skips_airtable_on_next_ticks(self):
+        self.store.create_poll = AsyncMock(
+            return_value={"id": 7, "message_id": None, "status": "open"}
+        )
+        self.store.set_poll_message = AsyncMock()
+        self.channel.send.return_value = SimpleNamespace(id=800)
+
+        self.assertTrue(await self.service.post_poll(456, self.day))
+        for _ in range(3):
+            self.assertFalse(await self.service.post_poll(456, self.day))
+
+        self.store.create_poll.assert_awaited_once()
+
+    async def test_existing_poll_marks_day_settled(self):
+        self.store.create_poll = AsyncMock(
+            return_value={"id": 7, "message_id": 800, "status": "open"}
+        )
+
+        self.assertFalse(await self.service.post_poll(456, self.day))
+        self.assertFalse(await self.service.post_poll(456, self.day))
+
+        self.store.create_poll.assert_awaited_once()
+
+    async def test_settled_report_skips_airtable_on_next_ticks(self):
+        poll = {"id": 7, "message_id": 800, "status": "closed"}
+        report = {
+            "poll_id": 7,
+            "message_id": None,
+            "yes_count": 0,
+            "maybe_count": 0,
+            "no_count": 0,
+            "no_reasons": [],
+            "responses": [],
+        }
+        self.store.get_poll = AsyncMock(return_value=poll)
+        self.store.get_report = AsyncMock(return_value=report)
+        poll_message = SimpleNamespace(edit=AsyncMock())
+        self.channel.fetch_message.return_value = poll_message
+        self.channel.send.return_value = SimpleNamespace(id=801)
+        self.store.set_report_message = AsyncMock()
+
+        self.assertTrue(await self.service.generate_report(456, self.day))
+        for _ in range(3):
+            self.assertFalse(await self.service.generate_report(456, self.day))
+
+        self.store.get_poll.assert_awaited_once()
+
+    async def test_no_poll_marks_report_settled_until_a_poll_posts(self):
+        self.store.get_poll = AsyncMock(return_value=None)
+
+        self.assertFalse(await self.service.generate_report(456, self.day))
+        self.assertFalse(await self.service.generate_report(456, self.day))
+        self.store.get_poll.assert_awaited_once()
+
+        # A late/manual poll clears the report mark so the evening report runs.
+        self.store.create_poll = AsyncMock(
+            return_value={"id": 7, "message_id": None, "status": "open"}
+        )
+        self.store.set_poll_message = AsyncMock()
+        self.channel.send.return_value = SimpleNamespace(id=800)
+        self.assertTrue(await self.service.post_poll(456, self.day))
+
+        self.store.get_poll = AsyncMock(return_value=None)
+        self.assertFalse(await self.service.generate_report(456, self.day))
+        self.store.get_poll.assert_awaited_once()
+
+    async def test_restore_primes_settled_polls(self):
+        self.store.get_poll = AsyncMock(
+            return_value={"id": 7, "message_id": 800, "status": "open"}
+        )
+
+        await self.service.restore_open_poll_views(self.day)
+        self.assertFalse(await self.service.post_poll(456, self.day))
+
+        self.store.create_poll = AsyncMock()
+        self.assertFalse(await self.service.post_poll(456, self.day))
+        self.store.create_poll.assert_not_awaited()
+
+    async def test_old_cache_entries_are_pruned(self):
+        self.service._polls_settled.add((456, self.day - timedelta(days=2)))
+        self.service._reports_settled.add((456, self.day - timedelta(days=2)))
+
+        self.service._prune_daily_state(self.day)
+
+        self.assertEqual(set(), self.service._polls_settled)
+        self.assertEqual(set(), self.service._reports_settled)
+
+    async def test_daily_work_skips_while_quota_blocked(self):
+        self.store.quota_blocked = True
+        self.store.create_poll = AsyncMock()
+        self.store.get_poll = AsyncMock()
+
+        self.assertEqual(0, await self.service.post_daily_polls(self.day))
+        self.assertEqual(0, await self.service.generate_daily_reports(self.day))
+
+        self.store.create_poll.assert_not_awaited()
+        self.store.get_poll.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,11 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
-from airtable_store import AirtablePollStore, PollClosedError
+from airtable_store import (
+    AirtablePollStore,
+    AirtableQuotaExceededError,
+    PollClosedError,
+)
 
 
 class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -371,6 +375,114 @@ class AirtablePollStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("unchanged", result)
         self.store._create.assert_not_awaited()
         self.store._update.assert_not_awaited()
+
+
+class _FakeResponse:
+    """Minimal aiohttp response double for _request tests."""
+
+    def __init__(self, status, body, headers=None):
+        self.status = status
+        self._body = body
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def text(self):
+        return self._body
+
+
+class _FakeSession:
+    """Serves queued responses and counts HTTP attempts."""
+
+    calls = 0
+    responses: list[_FakeResponse] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def request(self, *args, **kwargs):
+        type(self).calls += 1
+        return type(self).responses.pop(0)
+
+
+QUOTA_BODY = (
+    '{"errors":[{"error":"PUBLIC_API_BILLING_LIMIT_EXCEEDED",'
+    '"message":"API billing plan limit exceeded."}]}'
+)
+
+
+class QuotaCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import aiohttp
+        from unittest.mock import patch
+
+        self.store = AirtablePollStore("test-token", "appTest")
+        _FakeSession.calls = 0
+        _FakeSession.responses = []
+        patcher = patch.object(aiohttp, "ClientSession", _FakeSession)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_quota_error_detection(self):
+        self.assertTrue(self.store._is_quota_error(429, QUOTA_BODY))
+        self.assertTrue(
+            self.store._is_quota_error(
+                429, '{"error":{"type":"PUBLIC_API_BILLING_LIMIT_EXCEEDED"}}'
+            )
+        )
+        self.assertFalse(self.store._is_quota_error(200, QUOTA_BODY))
+        self.assertFalse(self.store._is_quota_error(429, '{"error":{"type":"RATE_LIMIT"}}'))
+        self.assertFalse(self.store._is_quota_error(429, "not json"))
+
+    async def test_quota_429_trips_breaker_and_blocks_followups(self):
+        _FakeSession.responses = [_FakeResponse(429, QUOTA_BODY)]
+
+        with self.assertRaises(AirtableQuotaExceededError):
+            await self.store._request("GET", "Polls")
+        self.assertEqual(1, _FakeSession.calls)
+        self.assertTrue(self.store.quota_blocked)
+
+        # While blocked, calls fail instantly without any HTTP request.
+        with self.assertRaises(AirtableQuotaExceededError):
+            await self.store._request("GET", "Polls")
+        self.assertEqual(1, _FakeSession.calls)
+
+    async def test_rate_limit_429_retries_once_without_tripping_breaker(self):
+        _FakeSession.responses = [
+            _FakeResponse(429, '{"error":{"type":"RATE_LIMIT"}}', {"Retry-After": "0"}),
+            _FakeResponse(200, '{"records": []}'),
+        ]
+
+        result = await self.store._request("GET", "Polls")
+
+        self.assertEqual({"records": []}, result)
+        self.assertEqual(2, _FakeSession.calls)
+        self.assertFalse(self.store.quota_blocked)
+
+    async def test_delete_records_batches_by_ten(self):
+        self.store._request = AsyncMock(return_value={"deleted": True})
+        record_ids = [f"rec{i:02d}" for i in range(23)]
+
+        deleted = await self.store.delete_records("Polls", record_ids)
+
+        self.assertEqual(23, deleted)
+        self.assertEqual(3, self.store._request.await_count)
+        first = self.store._request.await_args_list[0]
+        last = self.store._request.await_args_list[2]
+        self.assertEqual(("DELETE", "Polls"), first.args)
+        self.assertEqual(10, len(first.kwargs["params"]))
+        self.assertEqual(3, len(last.kwargs["params"]))
+        self.assertEqual(("records[]", "rec00"), first.kwargs["params"][0])
 
 
 if __name__ == "__main__":
