@@ -15,6 +15,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from airtable_store import AirtableQuotaExceededError
 from event_manager import timestamp, utcnow
 from planning import BANGKOK, report_period
 
@@ -40,6 +41,8 @@ class AdminWeb:
         self.community = None
         self.backups = None
         self.yearly_checked_at = float("-inf")
+        self._last_quota_notice_at = 0.0
+        self._events_restore_at = float("-inf")
         self.app = web.Application(middlewares=[self.boundary], client_max_size=24000)
         self.app.add_routes(
             [
@@ -678,6 +681,17 @@ class AdminWeb:
         )
         return web.json_response({"event": event})
 
+    def _note_quota_blocked(self) -> None:
+        """One calm log line per hour while Airtable's monthly quota is out."""
+        now = time.monotonic()
+        if now - self._last_quota_notice_at >= 3600:
+            self._last_quota_notice_at = now
+            LOGGER.warning(
+                "Airtable's monthly API limit is used up, so background work "
+                "is paused. It resumes on its own when the limit resets "
+                "(first day of the month) or the plan is upgraded."
+            )
+
     async def work(self):
         while True:
             await asyncio.sleep(15)
@@ -689,13 +703,31 @@ class AdminWeb:
                         if self.backups:
                             await self.backups.tick()
                         self.community.error = None
+                    except AirtableQuotaExceededError:
+                        self._note_quota_blocked()
+                        self.community.error = (
+                            "Airtable's monthly API limit is used up. Community "
+                            "features resume automatically when the limit resets."
+                        )
                     except Exception:
                         LOGGER.exception("Community worker failed")
                         self.community.error = "Community task failed. Check storage, task history and backup settings."
                 try:
                     if not self.events.ready:
-                        await self.events.restore()
-                    await self.events.tick()
+                        # Retry a failed restore at most once a minute, not on
+                        # every 15-second pass, to spare the API allowance.
+                        now_mono = time.monotonic()
+                        if now_mono - self._events_restore_at >= 60:
+                            self._events_restore_at = now_mono
+                            await self.events.restore()
+                    if self.events.ready:
+                        await self.events.tick()
+                except AirtableQuotaExceededError:
+                    self._note_quota_blocked()
+                    self.events.last_error = (
+                        "Airtable's monthly API limit is used up. Events resume "
+                        "automatically when the limit resets."
+                    )
                 except Exception:
                     LOGGER.exception("Web event worker failed")
                     self.events.last_error = "Event service could not reach storage. It will retry automatically."
@@ -707,6 +739,12 @@ class AdminWeb:
                     try:
                         await self.yearly_summary.run()
                         self.yearly_summary.last_error = None
+                    except AirtableQuotaExceededError:
+                        self._note_quota_blocked()
+                        self.yearly_summary.last_error = (
+                            "Airtable's monthly API limit is used up. The yearly "
+                            "summary retries automatically when the limit resets."
+                        )
                     except Exception:
                         LOGGER.exception(
                             "Yearly summary failed; will retry in one minute"

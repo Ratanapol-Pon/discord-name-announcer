@@ -25,6 +25,7 @@ class Community:
         self.ready = False
         self.error = None
         self.last_tick = None
+        self._last_restore_attempt = None
         self.reminder_reports = {}
 
     async def restore(self):
@@ -392,6 +393,12 @@ class Community:
 
     async def tick(self):
         if not self.ready:
+            # Storage may be down (quota, network); retry at most once a minute
+            # instead of on every 15-second worker pass.
+            attempted = self._last_restore_attempt
+            if attempted and utcnow() - attempted < timedelta(minutes=1):
+                return
+            self._last_restore_attempt = utcnow()
             await self.restore()
         now = utcnow().astimezone(BANGKOK)
         if self.last_tick and now - self.last_tick < timedelta(minutes=1):
