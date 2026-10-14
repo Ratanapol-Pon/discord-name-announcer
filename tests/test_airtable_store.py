@@ -485,5 +485,31 @@ class QuotaCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("records[]", "rec00"), first.kwargs["params"][0])
 
 
+class MaintenanceTests(unittest.TestCase):
+    def test_cleanup_formula_scopes_to_guild(self):
+        from maintenance import cleanup_formula
+
+        scoped = cleanup_formula(date(2026, 9, 1), 99)
+        self.assertIn("IS_BEFORE(CREATED_TIME(), '2026-09-01')", scoped)
+        self.assertIn("{Guild ID}='99'", scoped)
+
+        whole_base = cleanup_formula(date(2026, 9, 1), None)
+        self.assertIn("IS_BEFORE", whole_base)
+        self.assertNotIn("Guild ID", whole_base)
+
+    def test_cleanup_keeps_at_least_a_week(self):
+        from maintenance import cleanup_cutoff
+
+        with self.assertRaises(ValueError):
+            cleanup_cutoff(3)
+        self.assertEqual(date.today() - timedelta(days=45), cleanup_cutoff(45))
+
+    def test_voice_tables_are_opt_in(self):
+        from maintenance import CORE_TABLES, cleanup_tables
+
+        self.assertEqual(list(CORE_TABLES), cleanup_tables(False))
+        self.assertIn("Voice Sessions", cleanup_tables(True))
+
+
 if __name__ == "__main__":
     unittest.main()

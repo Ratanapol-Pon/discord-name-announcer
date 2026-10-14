@@ -2,7 +2,7 @@
 
 Free-plan bases stop accepting new records past 1,000 rows, and Teemo's
 polls, responses, reports and voice logs add up quickly. This script removes
-rows older than a cutoff, newest records are never touched.
+rows older than a cutoff; newest records are never touched.
 
 Dry-run by default (only counts what would go):
 
@@ -16,11 +16,13 @@ Options:
     --days N           Keep at least N days of history (default 45).
     --include-voice    Also clean Voice/Solo Voice Sessions. Off by default
                        because the December 25 yearly recap reads them.
+    --guild-id ID      Only clean one Discord server's records (default:
+                       the whole base).
 
 Credentials come from AIRTABLE_TOKEN / AIRTABLE_BASE_ID in the environment
 or the project .env file — the same settings the bot uses. Nothing is asked
-for interactively and nothing is printed beyond counts, so the token stays
-out of the console.
+for interactively, so the token never appears in the console. Server admins
+can also run a guild-scoped cleanup from the web console (no token needed).
 
 Note: deletes are API calls too, so this only works while the workspace is
 inside its monthly API allowance (the limit resets on the 1st of the month).
@@ -34,33 +36,11 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
-from airtable_store import (
-    POLLS_TABLE,
-    REPORTS_TABLE,
-    RESPONSES_TABLE,
-    SOLO_VOICE_SESSIONS_TABLE,
-    VOICE_SESSIONS_TABLE,
-    AirtablePollStore,
-    AirtableQuotaExceededError,
-)
-
-CORE_TABLES = [RESPONSES_TABLE, REPORTS_TABLE, POLLS_TABLE]
-VOICE_TABLES = [VOICE_SESSIONS_TABLE, SOLO_VOICE_SESSIONS_TABLE]
-
-
-async def clean_table(
-    store: AirtablePollStore, table: str, cutoff: date, apply: bool
-) -> tuple[int, int]:
-    """Return (old record count, deleted count) for one table."""
-    formula = f"IS_BEFORE(CREATED_TIME(), '{cutoff.isoformat()}')"
-    records = await store.list_records(table, formula)
-    record_ids = [record["id"] for record in records]
-    deleted = await store.delete_records(table, record_ids) if apply else 0
-    return len(record_ids), deleted
+from airtable_store import AirtablePollStore, AirtableQuotaExceededError
+from maintenance import DEFAULT_KEEP_DAYS, MIN_KEEP_DAYS, clean_old_records
 
 
 async def main() -> int:
@@ -68,8 +48,8 @@ async def main() -> int:
     parser.add_argument(
         "--days",
         type=int,
-        default=45,
-        help="keep at least this many days of history (default: 45)",
+        default=DEFAULT_KEEP_DAYS,
+        help=f"keep at least this many days of history (default: {DEFAULT_KEEP_DAYS})",
     )
     parser.add_argument(
         "--include-voice",
@@ -77,13 +57,19 @@ async def main() -> int:
         help="also clean voice session logs (the yearly recap needs them)",
     )
     parser.add_argument(
+        "--guild-id",
+        type=int,
+        default=None,
+        help="only clean one Discord server's records (default: whole base)",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="actually delete; without it only counts are shown",
     )
     args = parser.parse_args()
-    if args.days < 7:
-        parser.error("--days must be 7 or more so recent history stays intact.")
+    if args.days < MIN_KEEP_DAYS:
+        parser.error(f"--days must be {MIN_KEEP_DAYS} or more so recent history stays intact.")
 
     load_dotenv()
     token = os.environ.get("AIRTABLE_TOKEN", "").strip()
@@ -95,30 +81,18 @@ async def main() -> int:
         )
         return 2
 
-    cutoff = date.today() - timedelta(days=args.days)
-    tables = list(CORE_TABLES)
-    if args.include_voice:
-        tables.extend(VOICE_TABLES)
-
     store = AirtablePollStore(token, base_id)
     mode = "DELETE" if args.apply else "DRY-RUN (nothing is deleted)"
-    print(f"{mode} — records older than {cutoff.isoformat()} ({args.days} days)")
+    scope = f"server {args.guild_id}" if args.guild_id else "whole base"
+    print(f"{mode} — {scope}, keeping the last {args.days} days")
     try:
-        total_old = total_deleted = 0
-        for table in tables:
-            old, deleted = await clean_table(store, table, cutoff, args.apply)
-            total_old += old
-            total_deleted += deleted
-            if args.apply:
-                print(f"  {table}: deleted {deleted} row(s)")
-            else:
-                print(f"  {table}: would delete {old} row(s)")
-        if not args.apply:
-            print(
-                f"\n{total_old} old row(s) found. Re-run with --apply to delete them."
-            )
-        else:
-            print(f"\nDone — deleted {total_deleted} row(s).")
+        results = await clean_old_records(
+            store,
+            keep_days=args.days,
+            include_voice=args.include_voice,
+            guild_id=args.guild_id,
+            apply=args.apply,
+        )
     except AirtableQuotaExceededError:
         print(
             "\nAirtable's monthly API limit is used up, so cleanup cannot run "
@@ -127,6 +101,16 @@ async def main() -> int:
             "deletes do not use the API allowance)."
         )
         return 1
+    for table, counts in results.items():
+        if args.apply:
+            print(f"  {table}: deleted {counts['deleted']} row(s)")
+        else:
+            print(f"  {table}: would delete {counts['old']} row(s)")
+    total = sum(c["deleted" if args.apply else "old"] for c in results.values())
+    if not args.apply:
+        print(f"\n{total} old row(s) found. Re-run with --apply to delete them.")
+    else:
+        print(f"\nDone — deleted {total} row(s).")
     return 0
 
 

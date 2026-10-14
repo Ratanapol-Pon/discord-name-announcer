@@ -17,6 +17,7 @@ from aiohttp import web
 
 from airtable_store import AirtableQuotaExceededError
 from event_manager import timestamp, utcnow
+from maintenance import clean_old_records
 from planning import BANGKOK, report_period
 
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class AdminWeb:
                 web.get("/api/community", self.community_info),
                 web.post("/api/community/config", self.community_config),
                 web.post("/api/backups/create", self.backup_create),
+                web.post("/api/maintenance/cleanup", self.maintenance_cleanup),
                 web.get("/api/backups/{key}", self.backup_download),
                 web.post("/api/backups/{key}/restore", self.backup_restore),
                 web.post("/api/settings", self.settings),
@@ -606,6 +608,30 @@ class AdminWeb:
     async def backup_create(self, request):
         self.require_community()
         return web.json_response(await self.backups.create(request["member"].guild.id))
+
+    async def maintenance_cleanup(self, request):
+        """Count or delete this server's old Airtable records (dry-run first)."""
+        data = await request.json()
+        apply = data.get("apply") is True
+        if apply and data.get("confirmed") is not True:
+            raise ValueError("Check the counts first, then confirm the cleanup.")
+        try:
+            results = await clean_old_records(
+                self.store,
+                keep_days=data.get("days", 45),
+                include_voice=data.get("include_voice") is True,
+                guild_id=request["member"].guild.id,
+                apply=apply,
+            )
+        except AirtableQuotaExceededError:
+            raise web.HTTPServiceUnavailable(
+                reason=(
+                    "Airtable's monthly API limit is used up. Cleanup works again "
+                    "when the limit resets on the 1st of the month — or delete old "
+                    "rows by hand in Airtable, which does not use the API."
+                )
+            )
+        return web.json_response({"applied": apply, "tables": results})
 
     async def backup_download(self, request):
         self.require_community()

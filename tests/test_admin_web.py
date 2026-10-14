@@ -55,6 +55,14 @@ class MemoryStore:
     async def list_records(self, table, formula=None):
         return [copy.deepcopy(r) for t, r in self.rows.values() if t == table]
 
+    async def delete_records(self, table, record_ids):
+        deleted = 0
+        for record_id in record_ids:
+            if record_id in self.rows:
+                del self.rows[record_id]
+                deleted += 1
+        return deleted
+
 
 def fixture():
     member = SimpleNamespace(
@@ -211,9 +219,45 @@ class WebSecurityTests(unittest.IsolatedAsyncioTestCase):
         for path in ("/api/members/1", "/api/tasks", "/api/templates", "/api/community", "/api/backups/" + "a" * 32):
             self.assertEqual(401, (await self.client.get(path)).status)
         await self.sign_in()
-        for path in ("/api/reports/action", "/api/tasks/recover", "/api/templates", "/api/community/config", "/api/backups/create", "/api/backups/" + "a" * 32 + "/restore"):
+        for path in ("/api/reports/action", "/api/tasks/recover", "/api/templates", "/api/community/config", "/api/backups/create", "/api/maintenance/cleanup", "/api/backups/" + "a" * 32 + "/restore"):
             response = await self.client.post(path, json={}, headers={"Origin":self.admin.public_url})
             self.assertEqual(403, response.status)
+
+    async def test_cleanup_counts_then_deletes_with_confirmation(self):
+        await self.sign_in()
+        await self.store._create("Polls", {"Poll Key": "99:456:2026-08-01", "Guild ID": "99"})
+        await self.store._create("Polls", {"Poll Key": "99:456:2026-08-02", "Guild ID": "99"})
+
+        response = await self.client.post(
+            "/api/maintenance/cleanup", json={"days": 45}, headers=self.headers
+        )
+        self.assertEqual(200, response.status)
+        data = await response.json()
+        self.assertFalse(data["applied"])
+        self.assertEqual(2, data["tables"]["Polls"]["old"])
+        self.assertEqual(2, len(self.store.rows))
+
+        unconfirmed = await self.client.post(
+            "/api/maintenance/cleanup", json={"days": 45, "apply": True}, headers=self.headers
+        )
+        self.assertEqual(400, unconfirmed.status)
+        self.assertEqual(2, len(self.store.rows))
+
+        confirmed = await self.client.post(
+            "/api/maintenance/cleanup",
+            json={"days": 45, "apply": True, "confirmed": True},
+            headers=self.headers,
+        )
+        self.assertEqual(200, confirmed.status)
+        data = await confirmed.json()
+        self.assertTrue(data["applied"])
+        self.assertEqual(2, data["tables"]["Polls"]["deleted"])
+        self.assertEqual(0, len(self.store.rows))
+
+        too_short = await self.client.post(
+            "/api/maintenance/cleanup", json={"days": 2}, headers=self.headers
+        )
+        self.assertEqual(400, too_short.status)
 
     async def test_period_filters_and_member_details_use_selected_dates(self):
         await self.sign_in()
