@@ -114,6 +114,8 @@ last_announce: dict[int, float] = {}  # member_id -> unix time
 guild_locks: dict[int, asyncio.Lock] = {}  # one playback at a time per server
 game_poll_service: GamePollService | None = None
 poll_runtime_started = False
+settings_loaded = False
+last_settings_retry = 0.0
 # Per-guild daily poll settings. Env POLL_TIME/REPORT_TIME are only the
 # defaults shown to new servers; env POLL_CHANNEL_ID(S) seed the original
 # server once. After setup everything lives per guild in Airtable.
@@ -192,6 +194,7 @@ def _validate_guild_settings(settings: GuildSettings) -> None:
 
 async def _save_guild_settings(settings: GuildSettings, updated_by: str) -> None:
     """Validate, persist and activate one server's settings without restart."""
+    global settings_loaded
     _validate_guild_settings(settings)
     await game_poll_service.store.save_bot_settings(
         poll_time=settings.poll_time,
@@ -204,6 +207,7 @@ async def _save_guild_settings(settings: GuildSettings, updated_by: str) -> None
         setting_key=str(settings.guild_id),
     )
     settings_registry.put(settings)
+    settings_loaded = True  # a successful save proves storage is readable
 
 
 async def _guild_for_channels(channel_ids: list[int]) -> int | None:
@@ -436,7 +440,18 @@ def _install_clip(temp_path: str, user_id: int, ext: str) -> None:
 @tasks.loop(minutes=1)
 async def daily_scheduler():
     """Per-guild daily poll/report schedule; also covers restart catch-up."""
+    global settings_loaded, last_settings_retry
     now = datetime.now(BOT_TIMEZONE)
+    if not settings_loaded and time.monotonic() - last_settings_retry >= 900:
+        # Startup could not read settings (e.g. Airtable quota); retry every
+        # 15 minutes so polls resume on their own once storage answers again.
+        last_settings_retry = time.monotonic()
+        try:
+            await _load_guild_settings()
+            settings_loaded = True
+            LOGGER.info("Server settings loaded; daily polls are active.")
+        except Exception:
+            pass
     if web_admin and web_admin.community and not web_admin.community.ready:
         try:
             # Community state failed to load at startup (e.g. Airtable quota).
@@ -484,7 +499,7 @@ async def run_due_daily_tasks(now: datetime) -> None:
 
 @bot.event
 async def on_ready():
-    global poll_runtime_started
+    global poll_runtime_started, settings_loaded
 
     await bot.tree.sync()  # register slash commands with Discord
     print(f"✅ Logged in as {bot.user} (id {bot.user.id})")
@@ -508,6 +523,12 @@ async def on_ready():
             return
         try:
             await _load_guild_settings()
+            settings_loaded = True
+        except AirtableQuotaExceededError:
+            LOGGER.warning(
+                "Server settings will load automatically once Airtable's "
+                "monthly API limit resets."
+            )
         except Exception:
             LOGGER.exception(
                 "Stored Teemo settings are invalid; using environment defaults."
