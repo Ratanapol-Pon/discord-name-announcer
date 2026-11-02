@@ -26,6 +26,7 @@ class GuildSettingsTests(unittest.TestCase):
         self.assertEqual([], settings.poll_channel_ids)
         self.assertEqual("11:59", settings.poll_time)
         self.assertEqual("17:00", settings.report_time)
+        self.assertTrue(settings.bot_enabled)
 
     def test_setup_complete_requires_a_poll_channel(self):
         settings = GuildSettings(42, poll_channel_ids=[123])
@@ -79,6 +80,42 @@ class BotSettingsStoreTests(unittest.IsolatedAsyncioTestCase):
         per_guild = await real.get_bot_settings("99")
         self.assertEqual("12:00", per_guild["poll_time"])
         self.assertIsNone(await real.get_bot_settings("12345"))
+
+
+    async def test_master_switch_round_trips_and_defaults_on(self):
+        store = MemoryStore()
+        from airtable_store import AirtablePollStore
+
+        real = AirtablePollStore.__new__(AirtablePollStore)
+        import asyncio
+
+        real._settings_lock = asyncio.Lock()
+        real._find_one = store._find_one
+        real._create = store._create
+        real._update = store._update
+        real.list_records = store.list_records
+
+        await real.save_bot_settings(
+            poll_time="12:00",
+            report_time="18:00",
+            poll_channel_ids=[555],
+            announcement_channel_id=None,
+            updated_by="test",
+            bot_enabled=False,
+            setting_key="99",
+        )
+        await real.save_bot_settings(
+            poll_time="11:59",
+            report_time="17:00",
+            poll_channel_ids=[123],
+            announcement_channel_id=None,
+            updated_by="test",
+            setting_key="100",
+        )
+
+        records = await real.list_bot_settings()
+        self.assertFalse(records["99"]["bot_enabled"])
+        self.assertTrue(records["100"]["bot_enabled"])  # missing field = on
 
 
 class MultiGuildPollServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -150,6 +187,26 @@ class MultiGuildPollServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(0, created)
 
+    async def test_turned_off_server_posts_nothing(self):
+        self.registry.put(
+            GuildSettings(99, poll_channel_ids=[456], bot_enabled=False)
+        )
+        self.registry.put(GuildSettings(88, poll_channel_ids=[789]))
+        self.service.store.create_poll = AsyncMock(
+            side_effect=lambda guild_id, channel_id, poll_date: {
+                "id": f"{guild_id}:{channel_id}",
+                "message_id": None,
+                "status": "open",
+            }
+        )
+        self.service.store.set_poll_message = AsyncMock()
+
+        created = await self.service.post_daily_polls(date(2026, 9, 1))
+
+        self.assertEqual(1, created)
+        self.channels[456].send.assert_not_awaited()
+        self.channels[789].send.assert_awaited_once()
+
     async def test_unconfigured_server_gets_no_poll(self):
         self.registry.put(GuildSettings(77))  # no channels: setup incomplete
         created = await self.service.post_daily_polls(date(2026, 9, 1))
@@ -196,6 +253,17 @@ class DailySchedulerTests(unittest.IsolatedAsyncioTestCase):
         bot.game_poll_service.post_daily_polls.assert_awaited_once_with(
             date(2026, 9, 1), guild_id=99
         )
+        bot.game_poll_service.generate_daily_reports.assert_not_awaited()
+
+    async def test_turned_off_server_is_skipped_by_scheduler(self):
+        bot.settings_registry.put(
+            GuildSettings(99, poll_time="11:59", report_time="17:00",
+                          poll_channel_ids=[456], bot_enabled=False)
+        )
+        noon = datetime(2026, 9, 1, 12, 0, tzinfo=BANGKOK)
+        await bot.run_due_daily_tasks(noon)
+
+        bot.game_poll_service.post_daily_polls.assert_not_awaited()
         bot.game_poll_service.generate_daily_reports.assert_not_awaited()
 
     async def test_after_report_time_posts_report_not_poll(self):

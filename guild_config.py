@@ -11,7 +11,9 @@ class GuildSettings:
 
     A server with no saved settings record is "not set up": the name
     announcer works, but no polls/reports are posted there. A record with
-    at least one poll channel marks setup as complete.
+    at least one poll channel marks setup as complete. ``bot_enabled`` is the
+    per-server master switch: when off, Teemo stays completely quiet there
+    (no announcements, polls, posts, reminders, or voice recording).
     """
 
     guild_id: int
@@ -21,6 +23,7 @@ class GuildSettings:
     announcement_channel_id: int | None = None
     poll_enabled: bool = True
     report_enabled: bool = True
+    bot_enabled: bool = True
 
     @property
     def setup_complete(self) -> bool:
@@ -37,6 +40,7 @@ class GuildSettings:
             ),
             "poll_enabled": self.poll_enabled,
             "report_enabled": self.report_enabled,
+            "bot_enabled": self.bot_enabled,
             "timezone": timezone_name,
             "setup_complete": self.setup_complete,
         }

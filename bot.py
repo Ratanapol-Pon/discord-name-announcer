@@ -204,6 +204,7 @@ async def _save_guild_settings(settings: GuildSettings, updated_by: str) -> None
         updated_by=updated_by,
         poll_enabled=settings.poll_enabled,
         report_enabled=settings.report_enabled,
+        bot_enabled=settings.bot_enabled,
         setting_key=str(settings.guild_id),
     )
     settings_registry.put(settings)
@@ -248,6 +249,7 @@ async def _load_guild_settings() -> None:
                 announcement_channel_id=data.get("announcement_channel_id"),
                 poll_enabled=data.get("poll_enabled", True),
                 report_enabled=data.get("report_enabled", True),
+                bot_enabled=data.get("bot_enabled", True),
             )
         )
     legacy_candidates = [
@@ -277,10 +279,17 @@ async def _load_guild_settings() -> None:
                 announcement_channel_id=data.get("announcement_channel_id"),
                 poll_enabled=data.get("poll_enabled", True),
                 report_enabled=data.get("report_enabled", True),
+                bot_enabled=data.get("bot_enabled", True),
             ),
             f"Teemo startup ({source})",
         )
         LOGGER.info("Seeded settings for guild %s via %s", guild_id, source)
+
+
+def _bot_enabled_in(guild_id: int | str) -> bool:
+    """Per-server master switch. Servers never set up default to on."""
+    settings = settings_registry.for_guild(int(guild_id))
+    return settings.bot_enabled if settings is not None else True
 
 
 def _web_settings(guild_id: int):
@@ -299,7 +308,7 @@ async def _web_save_settings(data, member):
         raise ValueError("Choose 1–10 daily poll channels.")
     ids = list(dict.fromkeys(int(x) for x in ids))
     post_id = int(data.get("announcement_channel_id") or 0) or None
-    for flag in ("poll_enabled", "report_enabled"):
+    for flag in ("poll_enabled", "report_enabled", "bot_enabled"):
         if not isinstance(data.get(flag), bool):
             raise TypeError("Task switches must be on or off.")
     for channel_id in set(ids + [post_id or 0] + current.poll_channel_ids):
@@ -319,6 +328,7 @@ async def _web_save_settings(data, member):
             announcement_channel_id=post_id,
             poll_enabled=data["poll_enabled"],
             report_enabled=data["report_enabled"],
+            bot_enabled=data["bot_enabled"],
         ),
         f"{member} ({member.id})",
     )
@@ -329,6 +339,8 @@ async def _web_daily_action(action, member):
     settings = settings_registry.for_guild(member.guild.id)
     if not settings or not settings.poll_channel_ids:
         return "This server has no daily poll channels yet. Save the daily schedule first."
+    if not settings.bot_enabled:
+        return "Teemo is turned off in this server. Turn Teemo on in the daily schedule settings first."
     completed = 0
     for channel_id in settings.poll_channel_ids:
         channel = await _get_guild_message_channel(channel_id, member.guild.id)
@@ -479,6 +491,8 @@ async def run_due_daily_tasks(now: datetime) -> None:
     today = now.date()
     local_time = now.strftime("%H:%M")
     for settings in settings_registry.configured():
+        if not settings.bot_enabled:
+            continue
         try:
             if (
                 settings.poll_enabled
@@ -583,6 +597,10 @@ async def on_voice_state_update(
 ):
     # ignore bots (including ourselves)
     if member.bot:
+        return
+
+    # Master switch: Teemo stays fully silent in a server turned off by its admins.
+    if member.guild is not None and not _bot_enabled_in(member.guild.id):
         return
 
     # Ignore mute/deafen/video changes that do not change voice channel.
@@ -787,6 +805,7 @@ class ScheduleModal(discord.ui.Modal, title="Adjust Teemo's daily tasks"):
                     announcement_channel_id=post_channel_id,
                     poll_enabled=current.poll_enabled,
                     report_enabled=current.report_enabled,
+                    bot_enabled=current.bot_enabled,
                 ),
                 f"{interaction.user} ({interaction.user.id})",
             )
@@ -1060,6 +1079,7 @@ class SetupChannelsView(discord.ui.View):
             ),
             poll_enabled=current.poll_enabled,
             report_enabled=current.report_enabled,
+            bot_enabled=current.bot_enabled,
         )
         try:
             await _save_guild_settings(
@@ -1193,7 +1213,7 @@ async def _onboarding_tick(now: datetime) -> None:
         return
     for guild in bot.guilds:
         existing = settings_registry.for_guild(guild.id)
-        if existing and existing.setup_complete:
+        if existing and (existing.setup_complete or not existing.bot_enabled):
             continue
         record = community.get(f"onboard:{guild.id}")
         if not record:
@@ -1290,6 +1310,13 @@ async def gamepoll_test(interaction: discord.Interaction):
             "❌ The game poll is not configured for this channel.", ephemeral=True
         )
         return
+    if interaction.guild_id and not _bot_enabled_in(interaction.guild_id):
+        await interaction.response.send_message(
+            "Teemo is turned off in this server. Turn it back on in the web "
+            "console's daily schedule settings.",
+            ephemeral=True,
+        )
+        return
 
     await interaction.response.defer(ephemeral=True)
     created = await game_poll_service.post_poll(
@@ -1312,6 +1339,13 @@ async def gamepoll_test_report(interaction: discord.Interaction):
     if not game_poll_service or not interaction.channel_id:
         await interaction.response.send_message(
             "❌ The game poll is not configured for this channel.", ephemeral=True
+        )
+        return
+    if interaction.guild_id and not _bot_enabled_in(interaction.guild_id):
+        await interaction.response.send_message(
+            "Teemo is turned off in this server. Turn it back on in the web "
+            "console's daily schedule settings.",
+            ephemeral=True,
         )
         return
 
@@ -1515,6 +1549,7 @@ def _yearly_summary_channel_ids() -> list[int]:
     return [
         settings.announcement_channel_id or settings.poll_channel_ids[0]
         for settings in settings_registry.configured()
+        if settings.bot_enabled
     ]
 
 
@@ -1530,6 +1565,7 @@ async def main():
         if not public_url and os.getenv("RAILWAY_PUBLIC_DOMAIN"):
             public_url = "https://" + os.environ["RAILWAY_PUBLIC_DOMAIN"]
         events = EventManager(bot, game_poll_service.store)
+        events.guild_enabled = _bot_enabled_in
         web_admin = AdminWeb(bot, game_poll_service.store, events, _web_settings,
                              _web_save_settings, _web_daily_action, public_url)
         community = Community(bot, game_poll_service.store, game_poll_service, events)

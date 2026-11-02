@@ -98,6 +98,7 @@ def fixture():
         "announcement_channel_id": "123",
         "poll_enabled": True,
         "report_enabled": True,
+        "bot_enabled": True,
         "timezone": "Asia/Bangkok",
     }
     admin = AdminWeb(
@@ -300,6 +301,25 @@ class EventLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await manager.tick()
         self.assertEqual("cancelled", manager.events[event["key"]]["status"])
         channel.send.assert_not_awaited()
+
+    async def test_turned_off_server_events_wait_untouched(self):
+        _, manager, _, _, channel = fixture()
+        event = await manager.create(event_input(), 99, 1)
+        event.update(
+            status="scheduled",
+            publish_at=(utcnow() - timedelta(minutes=5)).isoformat(),
+        )
+        await manager.save(event)
+
+        manager.guild_enabled = lambda guild_id: False
+        await manager.tick()
+        self.assertEqual("scheduled", manager.events[event["key"]]["status"])
+        channel.send.assert_not_awaited()
+
+        manager.guild_enabled = lambda guild_id: True
+        await manager.tick()
+        self.assertEqual("open", manager.events[event["key"]]["status"])
+        channel.send.assert_awaited_once()
 
     async def test_failed_action_does_not_change_saved_audit(self):
         _, manager, _, _, _ = fixture()

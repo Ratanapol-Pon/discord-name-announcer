@@ -248,6 +248,7 @@ class AirtablePollStore:
             "updated_by": fields.get("Updated By"),
             "poll_enabled": fields.get("Poll Enabled", "yes") != "no",
             "report_enabled": fields.get("Report Enabled", "yes") != "no",
+            "bot_enabled": fields.get("Bot Enabled", "yes") != "no",
         }
 
     async def get_bot_settings(
@@ -285,6 +286,7 @@ class AirtablePollStore:
         updated_by: str,
         poll_enabled: bool | None = None,
         report_enabled: bool | None = None,
+        bot_enabled: bool | None = None,
         setting_key: str = "global",
     ) -> None:
         """Upsert one server's settings changed through Teemo's admin panel."""
@@ -304,6 +306,8 @@ class AirtablePollStore:
                 fields["Poll Enabled"] = "yes" if poll_enabled else "no"
             if report_enabled is not None:
                 fields["Report Enabled"] = "yes" if report_enabled else "no"
+            if bot_enabled is not None:
+                fields["Bot Enabled"] = "yes" if bot_enabled else "no"
             existing = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", setting_key)
             if existing:
                 await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)

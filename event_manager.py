@@ -160,6 +160,10 @@ class EventManager:
         self.ready = False
         self.last_error = None
         self.restore_error = None
+        # Per-server master switch (set by bot.py); default keeps tests and
+        # standalone use unchanged. Events in a turned-off server wait
+        # untouched until it is turned back on.
+        self.guild_enabled = lambda guild_id: True
 
     async def save(self, event):
         fields = {
@@ -470,6 +474,8 @@ class EventManager:
         async with self.lock:
             self.last_error = self.restore_error
             for original in list(self.events.values()):
+                if not self.guild_enabled(original["guild_id"]):
+                    continue
                 event = dict(original)
                 try:
                     if (

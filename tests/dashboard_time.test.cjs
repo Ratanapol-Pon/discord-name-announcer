@@ -45,7 +45,7 @@ test('Bangkok timestamps and display-only schedules include seconds', () => {
 test('cards, charts, member totals and session tables share the duration format', () => {
   evaluate(`dashboard = {
     stats: {responses: 4, voice_seconds: 450605, solo_seconds: 59, members: 1},
-    settings: {poll_time:'11:59',report_time:'17:00',poll_enabled:true,report_enabled:true},
+    settings: {poll_time:'11:59',report_time:'17:00',poll_enabled:true,report_enabled:true,bot_enabled:true},
     members: [{name:'Rz',seconds:450605,solo_seconds:59,sessions:1}],
     live: [], solo: [], voice: [{name:'Rz',channel:'Games',seconds:5445,
       joined:'2026-09-21T10:15:09Z',left:'2026-09-21T11:45:54Z',active:false}]

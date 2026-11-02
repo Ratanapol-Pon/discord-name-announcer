@@ -302,6 +302,8 @@ class Community:
                 or plan.get("poll_date") != now.date().isoformat()
             ):
                 continue
+            if not self.polls.settings_for(int(plan["guild_id"])).bot_enabled:
+                continue
             if now.strftime("%H:%M") < self.polls.settings_for(
                 int(plan["guild_id"])
             ).report_time:
@@ -500,6 +502,8 @@ class Community:
         async with self.operation_lock, self.events.lock:
             for original in list(self.rows.values()):
                 if original["kind"] != "template" or not original.get("enabled"):
+                    continue
+                if not self.polls.settings_for(int(original["guild_id"])).bot_enabled:
                     continue
                 template = copy.deepcopy(original)
                 due = timestamp(template["next_at"])

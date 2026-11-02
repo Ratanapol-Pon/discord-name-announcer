@@ -378,7 +378,7 @@ class GamePollService:
         for settings in self._configured_settings():
             if guild_id is not None and settings.guild_id != int(guild_id):
                 continue
-            if not settings.poll_enabled:
+            if not settings.bot_enabled or not settings.poll_enabled:
                 continue
             for channel_id in settings.poll_channel_ids:
                 try:
@@ -719,7 +719,7 @@ class GamePollService:
         for settings in self._configured_settings():
             if guild_id is not None and settings.guild_id != int(guild_id):
                 continue
-            if not settings.report_enabled:
+            if not settings.bot_enabled or not settings.report_enabled:
                 continue
             for channel_id in settings.poll_channel_ids:
                 try:

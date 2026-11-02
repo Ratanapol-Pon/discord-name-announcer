@@ -194,8 +194,11 @@ Create a base named **Teemo Game Polls** with these tables and fields:
 - `Bot Settings`: `Setting Key` (primary text — one record per server, keyed
   by the server's Discord ID; a legacy `global` record is migrated on startup),
   `Poll Time`, `Report Time`, `Poll Channel IDs`, `Announcement Channel ID`,
-  `Updated At`, `Updated By`, `Poll Enabled`, and `Report Enabled` (text:
-  `yes` / `no`; missing means enabled).
+  `Updated At`, `Updated By`, `Poll Enabled`, `Report Enabled`, and
+  `Bot Enabled` (text: `yes` / `no`; missing means enabled). `Bot Enabled`
+  is the per-server master switch: when `no`, Teemo stays completely quiet in
+  that server (no name announcements, polls, posts, reminders, or voice
+  recording) until an admin turns it back on.
 - `Admin Events` and `Event Votes`: each has `Key` (primary text), `Guild ID`,
   `Title`, `Status`, `Updated At` (text), and `Data` (long text containing JSON).
 
@@ -255,6 +258,9 @@ every request. `/teemo_admin` now opens the same web console.
   exports. Solo time is included in total voice time, not added twice.
 - **Daily schedule:** change daily times/channels, pause either task, and run
   today's poll or summary immediately. Saving past times does not send a post.
+  The "Teemo is on in this server" switch turns Teemo off entirely in one
+  server; settings and history are kept and everything resumes when Teemo is
+  turned back on.
 
 The UI uses Bangkok time. Attendance remains private; Discord's daily summary
 contains votes, play times and reasons only. Voice tracking measures presence,
