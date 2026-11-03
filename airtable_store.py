@@ -309,10 +309,19 @@ class AirtablePollStore:
             if bot_enabled is not None:
                 fields["Bot Enabled"] = "yes" if bot_enabled else "no"
             existing = await self._find_one(BOT_SETTINGS_TABLE, "Setting Key", setting_key)
-            if existing:
-                await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
-            else:
-                await self._create(BOT_SETTINGS_TABLE, fields)
+            try:
+                if existing:
+                    await self._update(BOT_SETTINGS_TABLE, existing["id"], fields)
+                else:
+                    await self._create(BOT_SETTINGS_TABLE, fields)
+            except RuntimeError as exc:
+                if "Bot Enabled" in str(exc) and "UNKNOWN_FIELD" in str(exc).upper():
+                    raise ValueError(
+                        "Airtable's Bot Settings table is missing the "
+                        "'Bot Enabled' field. Add it in Airtable as a "
+                        "single-line text field, then save again."
+                    ) from exc
+                raise
 
     async def list_records(self, table: str, formula: str | None = None) -> list:
         """Read every page; callers explicitly scope records to their server."""

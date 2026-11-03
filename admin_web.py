@@ -142,6 +142,8 @@ class AdminWeb:
             response = web.json_response({"error": exc.reason}, status=exc.status)
         except (ValueError, TypeError, KeyError) as exc:
             response = web.json_response({"error": str(exc)}, status=400)
+        except AirtableQuotaExceededError as exc:
+            response = web.json_response({"error": str(exc)}, status=503)
         except Exception:
             LOGGER.exception("Web request failed: %s", request.path)
             response = web.json_response(

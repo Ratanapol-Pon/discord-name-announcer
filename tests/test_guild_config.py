@@ -117,6 +117,35 @@ class BotSettingsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(records["99"]["bot_enabled"])
         self.assertTrue(records["100"]["bot_enabled"])  # missing field = on
 
+    async def test_missing_bot_enabled_column_gets_actionable_error(self):
+        store = MemoryStore()
+        from airtable_store import AirtablePollStore
+
+        real = AirtablePollStore.__new__(AirtablePollStore)
+        import asyncio
+
+        real._settings_lock = asyncio.Lock()
+        real._find_one = AsyncMock(return_value={"id": "recSettings"})
+
+        async def unknown_field(*args, **kwargs):
+            raise RuntimeError(
+                'Airtable request failed (422): {\'type\': \'UNKNOWN_FIELD_NAME\', '
+                '\'text\': \'Unknown field name: "Bot Enabled"\'}'
+            )
+
+        real._update = unknown_field
+
+        with self.assertRaisesRegex(ValueError, "Bot Enabled"):
+            await real.save_bot_settings(
+                poll_time="12:00",
+                report_time="18:00",
+                poll_channel_ids=[555],
+                announcement_channel_id=None,
+                updated_by="test",
+                bot_enabled=False,
+                setting_key="99",
+            )
+
 
 class MultiGuildPollServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
